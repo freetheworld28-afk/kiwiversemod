@@ -1,4 +1,6 @@
 const { Events, REST, Routes, ActivityType } = require('discord.js');
+const { initDashboardSchema } = require('../api/init.js');
+const { startApiServer } = require('../api/server.js');
 
 module.exports = {
   name: Events.ClientReady,
@@ -7,11 +9,15 @@ module.exports = {
     console.log(`✅ KiwiVerse Bot online as ${client.user.tag}`);
     client.user.setActivity('over the KiwiVerse', { type: ActivityType.Watching });
 
-    // Initialize database
+    // Initialize bot database tables.
     const { initDatabase } = require('../index.js');
     await initDatabase();
 
-    // Register slash commands
+    // Initialize dashboard configuration storage and API.
+    await initDashboardSchema(database);
+    startApiServer(client, database);
+
+    // Register slash commands.
     try {
       const commands = Array.from(client.commands.values()).map((cmd) => cmd.data.toJSON());
 
@@ -29,4 +35,3 @@ module.exports = {
     }
   },
 };
-
