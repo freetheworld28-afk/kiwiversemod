@@ -1,10 +1,11 @@
 {
-  "name": "kiwiverse-mod",
-  "version": "1.0.0",
-  "description": "KiwiVerse Mod - Discord moderation bot with anti-raid engine, content filters, and SQLite persistence.",
+  "name": "kiwiverse-mod-all-in-one",
+  "version": "2.0.0",
+  "description": "KiwiVerse All-in-One Discord Bot - Moderation, Leveling, Games, Utility, and More",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "engines": {
     "node": ">=18"
@@ -15,6 +16,11 @@
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1"
+    "sqlite3": "^6.0.1",
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
+
