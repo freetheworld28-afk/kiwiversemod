@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { notifyUser } = require('../services/notificationService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -10,7 +11,6 @@ const STAFF_TIERS = [
 function getStaffTier(member) {
   if (!member || !member.permissions || !member.roles?.cache) return null;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return STAFF_TIERS.length - 1;
-
   let highestTier = null;
   STAFF_TIERS.forEach((tier, index) => {
     if (tier.id && member.roles.cache.has(tier.id)) highestTier = index;
@@ -18,47 +18,23 @@ function getStaffTier(member) {
   return highestTier;
 }
 
-async function sendDMToUser(user, action, reason, duration = null, guildName = null) {
-  try {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`⚠️ You have been ${action.toLowerCase()}ed`)
-      .setDescription(`You were ${action.toLowerCase()}ed from **${guildName}**`)
-      .addFields(
-        { name: 'Reason', value: reason || 'No reason provided' },
-        ...(duration ? [{ name: 'Duration', value: duration, inline: true }] : []),
-      )
-      .setFooter({ text: 'If you believe this was a mistake, contact server staff.' })
-      .setTimestamp();
-
-    await user.send({ embeds: [embed] });
-    return true;
-  } catch (error) {
-    console.error(`Failed to DM user ${user.tag}:`, error.message);
-    return false;
-  }
-}
-
-async function logModAction(interaction, action, target, reason, extraFields = []) {
+async function logModAction(interaction, target, reason, dmDelivered) {
   const logsChannel = interaction.guild.channels.cache.find(
     (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
   );
+  if (!logsChannel) return;
 
-  if (logsChannel) {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`📋 ${action} Issued`)
-      .addFields(
-        { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
-        { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-        ...extraFields,
-        { name: 'Reason', value: reason || 'No reason provided.' },
-      )
-      .setFooter({ text: `Actioned by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    await logsChannel.send({ embeds: [embed] }).catch(() => null);
-  }
+  const embed = new EmbedBuilder()
+    .setColor(0xe67e22)
+    .setTitle('📋 Kick Issued')
+    .addFields(
+      { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
+      { name: 'Moderator', value: interaction.user.tag, inline: true },
+      { name: 'Reason', value: reason },
+      { name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
+    )
+    .setTimestamp();
+  await logsChannel.send({ embeds: [embed] }).catch(() => null);
 }
 
 module.exports = {
@@ -68,46 +44,37 @@ module.exports = {
     .addUserOption((opt) => opt.setName('user').setDescription('Member to kick').setRequired(true))
     .addStringOption((opt) => opt.setName('reason').setDescription('Kick reason')),
 
-  async execute(interaction, client, database, cache) {
+  async execute(interaction) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 1) {
-      return interaction.reply({
-        content: '⛔ You need Moderator or higher to use this command.',
-        flags: MessageFlags.Ephemeral,
-      });
+      return interaction.reply({ content: '⛔ You need Moderator or higher to use this command.', flags: MessageFlags.Ephemeral });
     }
 
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason provided';
-
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      // Send DM to user first
-      await sendDMToUser(target, 'Kick', reason, null, interaction.guild.name);
-
-      // Get the member and kick them
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) {
-        return interaction.editReply({
-          content: '❌ Could not find that member in the server.',
-        });
-      }
+      if (!member) return interaction.editReply({ content: '❌ Could not find that member in the server.' });
+
+      const dm = await notifyUser(target, {
+        title: '👢 You have been kicked',
+        description: `You were kicked from **${interaction.guild.name}**.`,
+        color: 0xe67e22,
+        fields: [{ name: 'Reason', value: reason }],
+        footer: 'You may rejoin unless server staff have restricted access.',
+      });
 
       await member.kick(`${interaction.user.tag} | ${reason}`);
-
-      // Log the action
-      await logModAction(interaction, 'Kick', target, reason);
+      await logModAction(interaction, target, reason, dm.delivered);
 
       return interaction.editReply({
-        content: `👢 **${target.tag}** has been kicked.\n📨 DM sent to user.`,
+        content: `👢 **${target.tag}** has been kicked.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
       });
     } catch (error) {
       console.error('Kick error:', error);
-      return interaction.editReply({
-        content: `❌ Failed to kick user: ${error.message}`,
-      });
+      return interaction.editReply({ content: `❌ Failed to kick user: ${error.message}` });
     }
   },
 };
-
