@@ -1,0 +1,35 @@
+COMPLETE FILE LIST FOR GITHUB UPDATE
+====================================
+
+Files to CREATE or REPLACE:
+
+1. package.json (REPLACE)
+2. .env.example (NEW)
+3. index.js (REPLACE)
+4. ecosystem.config.js (REPLACE)
+5. README.md (REPLACE)
+6. SETUP_INSTRUCTIONS.md (NEW - optional, just for reference)
+
+Folders to CREATE:
+- commands/
+- events/
+- features/
+
+Files in commands/ (NEW):
+- commands/moderation.js
+- commands/economy.js
+- commands/games.js
+- commands/info.js
+- commands/help.js
+
+Files in events/ (NEW):
+- events/ready.js
+- events/interactionCreate.js
+- events/messageCreate.js
+- events/guildMemberAdd.js
+
+Files in features/ (NEW):
+- features/leveling.js
+- features/contentFilter.js
+
+TOTAL: 16 files + 3 folders to create/replace
