@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { notifyUser } = require('../services/notificationService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -10,7 +11,6 @@ const STAFF_TIERS = [
 function getStaffTier(member) {
   if (!member || !member.permissions || !member.roles?.cache) return null;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return STAFF_TIERS.length - 1;
-
   let highestTier = null;
   STAFF_TIERS.forEach((tier, index) => {
     if (tier.id && member.roles.cache.has(tier.id)) highestTier = index;
@@ -23,54 +23,30 @@ function formatDuration(ms) {
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
-
   if (days > 0) return `${days} day${days > 1 ? 's' : ''}`;
   if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''}`;
   if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''}`;
   return `${seconds} second${seconds > 1 ? 's' : ''}`;
 }
 
-async function sendDMToUser(user, action, reason, duration = null, guildName = null) {
-  try {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`⚠️ You have been ${action.toLowerCase()}ed`)
-      .setDescription(`You were ${action.toLowerCase()}ed from **${guildName}**`)
-      .addFields(
-        { name: 'Reason', value: reason || 'No reason provided' },
-        ...(duration ? [{ name: 'Duration', value: duration, inline: true }] : []),
-      )
-      .setFooter({ text: 'If you believe this was a mistake, contact server staff.' })
-      .setTimestamp();
-
-    await user.send({ embeds: [embed] });
-    return true;
-  } catch (error) {
-    console.error(`Failed to DM user ${user.tag}:`, error.message);
-    return false;
-  }
-}
-
-async function logModAction(interaction, action, target, reason, extraFields = []) {
+async function logModAction(interaction, target, reason, duration, dmDelivered) {
   const logsChannel = interaction.guild.channels.cache.find(
     (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
   );
+  if (!logsChannel) return;
 
-  if (logsChannel) {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`📋 ${action} Issued`)
-      .addFields(
-        { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
-        { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-        ...extraFields,
-        { name: 'Reason', value: reason || 'No reason provided.' },
-      )
-      .setFooter({ text: `Actioned by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    await logsChannel.send({ embeds: [embed] }).catch(() => null);
-  }
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('📋 Timeout Issued')
+    .addFields(
+      { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
+      { name: 'Moderator', value: interaction.user.tag, inline: true },
+      { name: 'Duration', value: duration, inline: true },
+      { name: 'Reason', value: reason },
+      { name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
+    )
+    .setTimestamp();
+  await logsChannel.send({ embeds: [embed] }).catch(() => null);
 }
 
 module.exports = {
@@ -97,50 +73,42 @@ module.exports = {
     )
     .addStringOption((opt) => opt.setName('reason').setDescription('Timeout reason')),
 
-  async execute(interaction, client, database, cache) {
+  async execute(interaction) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 0) {
-      return interaction.reply({
-        content: '⛔ You need Trial Mod or higher to use this command.',
-        flags: MessageFlags.Ephemeral,
-      });
+      return interaction.reply({ content: '⛔ You need Trial Mod or higher to use this command.', flags: MessageFlags.Ephemeral });
     }
 
     const target = interaction.options.getUser('user');
     const durationMs = Number.parseInt(interaction.options.getString('duration'), 10);
     const reason = interaction.options.getString('reason') || 'No reason provided';
     const durationStr = formatDuration(durationMs);
-
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      // Send DM to user first
-      await sendDMToUser(target, 'Timeout', reason, durationStr, interaction.guild.name);
-
-      // Get the member and timeout them
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) {
-        return interaction.editReply({
-          content: '❌ Could not find that member in the server.',
-        });
-      }
+      if (!member) return interaction.editReply({ content: '❌ Could not find that member in the server.' });
+
+      const dm = await notifyUser(target, {
+        title: '⏳ You have been timed out',
+        description: `You were timed out in **${interaction.guild.name}**.`,
+        color: 0xfee75c,
+        fields: [
+          { name: 'Duration', value: durationStr, inline: true },
+          { name: 'Reason', value: reason },
+        ],
+        footer: 'Your ability to interact will return automatically when the timeout expires.',
+      });
 
       await member.timeout(durationMs, `${interaction.user.tag} | ${reason}`);
-
-      // Log the action
-      await logModAction(interaction, 'Timeout', target, reason, [
-        { name: 'Duration', value: durationStr, inline: true },
-      ]);
+      await logModAction(interaction, target, reason, durationStr, dm.delivered);
 
       return interaction.editReply({
-        content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n📨 DM sent to user.`,
+        content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
       });
     } catch (error) {
       console.error('Timeout error:', error);
-      return interaction.editReply({
-        content: `❌ Failed to timeout user: ${error.message}`,
-      });
+      return interaction.editReply({ content: `❌ Failed to timeout user: ${error.message}` });
     }
   },
 };
-

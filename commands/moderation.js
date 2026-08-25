@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { notifyUser } = require('../services/notificationService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -18,28 +19,7 @@ function getStaffTier(member) {
   return highestTier;
 }
 
-async function sendDMToUser(user, action, reason, duration = null, guildName = null) {
-  try {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`⚠️ You have been ${action.toLowerCase()}ed`)
-      .setDescription(`You were ${action.toLowerCase()}ed from **${guildName}**`)
-      .addFields(
-        { name: 'Reason', value: reason || 'No reason provided' },
-        ...(duration ? [{ name: 'Duration', value: duration, inline: true }] : []),
-      )
-      .setFooter({ text: 'If you believe this was a mistake, contact server staff.' })
-      .setTimestamp();
-
-    await user.send({ embeds: [embed] });
-    return true;
-  } catch (error) {
-    console.error(`Failed to DM user ${user.tag}:`, error.message);
-    return false;
-  }
-}
-
-async function logModAction(interaction, action, target, reason, extraFields = []) {
+async function logModAction(interaction, action, target, reason, extraFields = [], dmDelivered = null) {
   const logsChannel = interaction.guild.channels.cache.find(
     (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
   );
@@ -53,6 +33,7 @@ async function logModAction(interaction, action, target, reason, extraFields = [
         { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
         ...extraFields,
         { name: 'Reason', value: reason || 'No reason provided.' },
+        ...(dmDelivered === null ? [] : [{ name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true }]),
       )
       .setFooter({ text: `Actioned by ${interaction.user.tag}` })
       .setTimestamp();
@@ -71,7 +52,7 @@ module.exports = {
       opt.setName('days').setDescription('Delete messages from this many days back').setMinValue(0).setMaxValue(7),
     ),
 
-  async execute(interaction, client, database, cache) {
+  async execute(interaction) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 2) {
       return interaction.reply({
@@ -87,22 +68,25 @@ module.exports = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      // Send DM to user first
-      await sendDMToUser(target, 'Ban', reason, null, interaction.guild.name);
+      const dm = await notifyUser(target, {
+        title: '🔨 You have been banned',
+        description: `You were banned from **${interaction.guild.name}**.`,
+        color: 0xed4245,
+        fields: [{ name: 'Reason', value: reason }],
+        footer: 'If you believe this was a mistake, use the server appeal process if available.',
+      });
 
-      // Ban the user
       await interaction.guild.members.ban(target.id, {
         deleteMessageSeconds: purgeDays * 86400,
         reason: `${interaction.user.tag} | ${reason}`,
       });
 
-      // Log the action
       await logModAction(interaction, 'Ban', target, reason, [
         { name: 'Message Purge', value: `${purgeDays} day(s)`, inline: true },
-      ]);
+      ], dm.delivered);
 
       return interaction.editReply({
-        content: `🔨 **${target.tag}** has been banned.\n📨 DM sent to user.`,
+        content: `🔨 **${target.tag}** has been banned.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
       });
     } catch (error) {
       console.error('Ban error:', error);
@@ -112,4 +96,3 @@ module.exports = {
     }
   },
 };
-
