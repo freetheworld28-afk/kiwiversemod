@@ -28,21 +28,44 @@ const {
   ANNOUNCEMENTS_CHANNEL_NAME = 'announcements',
 } = process.env;
 
-// Railway's application filesystem is ephemeral between deployments unless a
-// persistent volume is mounted. Set DB_FILE=/data/database.sqlite when using a
-// Railway volume mounted at /data so XP, tickets, verification and settings
-// survive bot redeploys.
-const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'database.sqlite');
+// Railway's normal application filesystem is ephemeral. Prefer an explicitly
+// configured DB_FILE, otherwise automatically use /data/database.sqlite when a
+// Railway volume is mounted at /data. Only fall back to the repo directory for
+// local development.
+const persistentDataDir = '/data';
+const hasPersistentDataDir = (() => {
+  try {
+    return fs.existsSync(persistentDataDir) && fs.statSync(persistentDataDir).isDirectory();
+  } catch {
+    return false;
+  }
+})();
+
+const DB_FILE = process.env.DB_FILE
+  || (hasPersistentDataDir
+    ? path.join(persistentDataDir, 'database.sqlite')
+    : path.join(__dirname, 'database.sqlite'));
+
 const dbDirectory = path.dirname(DB_FILE);
 if (!fs.existsSync(dbDirectory)) fs.mkdirSync(dbDirectory, { recursive: true });
+
+const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID);
+const persistentStorage = DB_FILE.startsWith('/data/') || (!isRailway && !DB_FILE.startsWith('/app/'));
+
 console.log(`💾 KiwiVerse database: ${DB_FILE}`);
+if (isRailway && !persistentStorage) {
+  console.error('🚨 PERSISTENCE WARNING: KiwiVerse is running on Railway without /data persistent storage.');
+  console.error('🚨 XP, levels, applications, tickets, invites, Roblox links, settings and moderation history may be erased on the next deploy.');
+  console.error('🚨 Add a Railway Volume mounted at /data. KiwiVerse will automatically use /data/database.sqlite.');
+} else if (persistentStorage) {
+  console.log('✅ Persistent database storage detected');
+}
 
 // Initialize Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildInvites,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
@@ -54,7 +77,9 @@ const client = new Client({
 // Initialize database
 const database = open({ filename: DB_FILE, driver: sqlite3.Database });
 
-// Cache for performance
+// Cache for performance. This is deliberately non-persistent and is only for
+// temporary runtime data such as cooldowns/invite snapshots. Authoritative bot
+// history lives in SQLite.
 const cache = new NodeCache({ stdTTL: 600 });
 
 // Collections for commands and features
@@ -212,7 +237,35 @@ async function initDatabase() {
       expires_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Runtime/persistence metadata. This lets us prove whether the same database
+    -- survived a restart/deployment instead of silently starting from scratch.
+    CREATE TABLE IF NOT EXISTS bot_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
   `);
+
+  const installIdRow = await db.get("SELECT value FROM bot_metadata WHERE key = 'install_id'");
+  if (!installIdRow) {
+    const installId = require('crypto').randomBytes(12).toString('hex');
+    await db.run(
+      "INSERT INTO bot_metadata (key, value, updated_at) VALUES ('install_id', ?, CURRENT_TIMESTAMP)",
+      installId,
+    );
+    console.log(`🆕 Created database install ID ${installId}`);
+  } else {
+    console.log(`♻️ Reusing persistent database install ID ${installIdRow.value}`);
+  }
+
+  await db.run(
+    `INSERT INTO bot_metadata (key, value, updated_at)
+     VALUES ('last_start', ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+    new Date().toISOString(),
+  );
+
   console.log('✅ Database initialized');
 }
 
@@ -220,4 +273,4 @@ async function initDatabase() {
 client.login(DISCORD_TOKEN);
 
 // Export for use in events and commands
-module.exports = { client, database, cache, initDatabase };
+module.exports = { client, database, cache, initDatabase, DB_FILE, persistentStorage };
