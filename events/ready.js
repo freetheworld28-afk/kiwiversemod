@@ -5,7 +5,7 @@ const { startApiServer } = require('../api/server.js');
 module.exports = {
   name: Events.ClientReady,
   once: true,
-  async execute(client, database, cache) {
+  async execute(_readyClient, client, database, cache) {
     console.log(`✅ KiwiVerse Bot online as ${client.user.tag}`);
     client.user.setActivity('over the KiwiVerse', { type: ActivityType.Watching });
 
