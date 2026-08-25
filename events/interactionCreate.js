@@ -31,8 +31,9 @@ module.exports = {
         return;
       }
 
-      if (interaction.isButton() && interaction.customId === 'apply_start') {
-        await applicationService.startApplication(interaction, database);
+      if (interaction.isButton() && (interaction.customId === 'apply_start' || interaction.customId.startsWith('apply_start:'))) {
+        const slug = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : 'staff';
+        await applicationService.startApplication(interaction, database, slug);
         return;
       }
 
@@ -41,8 +42,15 @@ module.exports = {
         return;
       }
 
-      if (interaction.isModalSubmit() && interaction.customId === 'apply_submit') {
-        await applicationService.submitApplication(interaction, database);
+      if (interaction.isModalSubmit() && (interaction.customId === 'apply_submit' || interaction.customId.startsWith('apply_submit:'))) {
+        const slug = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : 'staff';
+        await applicationService.submitApplication(interaction, database, slug);
+        return;
+      }
+
+      if (interaction.isModalSubmit() && interaction.customId.startsWith('apply_form_create:')) {
+        const reviewChannelId = interaction.customId.split(':')[1] || '';
+        await applicationService.createForm(interaction, database, reviewChannelId);
         return;
       }
 
