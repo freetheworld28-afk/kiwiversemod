@@ -1,9 +1,12 @@
 const { Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const inviteTracker = require('../services/inviteTrackerService');
 
 module.exports = {
   name: Events.GuildMemberAdd,
   async execute(member, client, database, cache) {
     try {
+      await inviteTracker.handleMemberAdd(member, database);
+
       // Deliver welcome message
       const welcomeChannel = member.guild.channels.cache.find(
         (ch) => ch.name === process.env.WELCOME_CHANNEL_NAME && ch.isTextBased(),
@@ -74,4 +77,3 @@ module.exports = {
     }
   },
 };
-
