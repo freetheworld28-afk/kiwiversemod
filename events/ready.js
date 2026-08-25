@@ -23,12 +23,20 @@ module.exports = {
 
       if (commands.length > 0) {
         const rest = new REST().setToken(process.env.DISCORD_TOKEN);
-        const route = process.env.GUILD_ID
-          ? Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID)
-          : Routes.applicationCommands(process.env.CLIENT_ID);
 
-        await rest.put(route, { body: commands });
-        console.log(`✅ Registered ${commands.length} slash commands`);
+        if (process.env.GUILD_ID) {
+          // Use fast guild-scoped commands for KiwiVerse. Clear any old global
+          // registrations first so Discord does not show duplicate slash commands.
+          await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
+          await rest.put(
+            Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+            { body: commands },
+          );
+          console.log(`✅ Registered ${commands.length} guild slash commands and cleared old global duplicates`);
+        } else {
+          await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+          console.log(`✅ Registered ${commands.length} global slash commands`);
+        }
       }
     } catch (error) {
       console.error('❌ Failed to register commands:', error);
