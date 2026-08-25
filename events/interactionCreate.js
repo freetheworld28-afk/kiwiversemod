@@ -1,5 +1,6 @@
 const { Events, MessageFlags } = require('discord.js');
 const ticketService = require('../services/ticketService');
+const applicationService = require('../services/applicationService');
 
 module.exports = {
   name: Events.InteractionCreate,
@@ -27,6 +28,26 @@ module.exports = {
 
       if (interaction.isButton() && interaction.customId.startsWith('ticket_')) {
         await ticketService.handleButton(interaction, database);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId === 'apply_start') {
+        await applicationService.startApplication(interaction, database);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId === 'apply_status') {
+        await applicationService.showStatus(interaction, database);
+        return;
+      }
+
+      if (interaction.isModalSubmit() && interaction.customId === 'apply_submit') {
+        await applicationService.submitApplication(interaction, database);
+        return;
+      }
+
+      if (interaction.isButton() && /^(apply_accept|apply_reject|apply_interview):\d+$/.test(interaction.customId)) {
+        await applicationService.handleDecision(interaction, database);
       }
     } catch (error) {
       console.error(`Interaction error (${interaction.customId || interaction.commandName || 'unknown'}):`, error);
