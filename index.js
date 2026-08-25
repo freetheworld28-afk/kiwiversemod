@@ -28,7 +28,14 @@ const {
   ANNOUNCEMENTS_CHANNEL_NAME = 'announcements',
 } = process.env;
 
-const DB_FILE = path.join(__dirname, 'database.sqlite');
+// Railway's application filesystem is ephemeral between deployments unless a
+// persistent volume is mounted. Set DB_FILE=/data/database.sqlite when using a
+// Railway volume mounted at /data so XP, tickets, verification and settings
+// survive bot redeploys.
+const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'database.sqlite');
+const dbDirectory = path.dirname(DB_FILE);
+if (!fs.existsSync(dbDirectory)) fs.mkdirSync(dbDirectory, { recursive: true });
+console.log(`💾 KiwiVerse database: ${DB_FILE}`);
 
 // Initialize Discord client
 const client = new Client({
@@ -213,4 +220,3 @@ client.login(DISCORD_TOKEN);
 
 // Export for use in events and commands
 module.exports = { client, database, cache, initDatabase };
-
