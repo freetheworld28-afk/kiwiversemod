@@ -2,6 +2,8 @@
 
 A comprehensive Discord bot featuring moderation, leveling, games, economy, giveaways, tickets, and much more.
 
+> Railway deployment trigger: KiwiVerse V3 is now live on `main`, including the dashboard API and ticket system.
+
 ## ✨ Features
 
 ### 🛡️ Moderation
