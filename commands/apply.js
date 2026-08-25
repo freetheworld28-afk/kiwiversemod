@@ -1,12 +1,47 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags, ChannelType } = require('discord.js');
+const {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  MessageFlags,
+  ChannelType,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+} = require('discord.js');
 const applicationService = require('../services/applicationService');
+
+function buildEasyPanel() {
+  const embed = new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle('📝 KiwiVerse Application Manager')
+    .setDescription('Manage applications without remembering form IDs or lots of commands. Use the buttons below.')
+    .addFields(
+      { name: 'Quick panels', value: 'Post a **Staff** or **Game Tester** application panel in this channel.' },
+      { name: 'Custom forms', value: 'Create your own application form with custom questions.' },
+      { name: 'Review', value: 'Open recent applications and act on them.' },
+    );
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('apply_easy_post:staff').setLabel('Post Staff Panel').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('apply_easy_post:game-tester').setLabel('Post Tester Panel').setEmoji('🎮').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('apply_easy_create').setLabel('Create Custom Form').setEmoji('➕').setStyle(ButtonStyle.Success),
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('apply_easy_forms').setLabel('View Forms').setEmoji('📚').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('apply_easy_list').setLabel('Review Applications').setEmoji('📋').setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [row1, row2] };
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('apply')
     .setDescription('KiwiVerse application system')
+    .addSubcommand((sub) => sub.setName('setup').setDescription('Open the easy application manager'))
     .addSubcommand((sub) => sub
       .setName('start')
       .setDescription('Start an application')
@@ -34,6 +69,13 @@ module.exports = {
   async execute(interaction, client, database) {
     const subcommand = interaction.options.getSubcommand();
 
+    if (subcommand === 'setup') {
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+        return interaction.reply({ content: '⛔ You need Manage Server to open the application manager.', flags: MessageFlags.Ephemeral });
+      }
+      return interaction.reply({ ...buildEasyPanel(), flags: MessageFlags.Ephemeral });
+    }
+
     if (subcommand === 'start') return applicationService.startApplication(interaction, database, interaction.options.getString('form') || 'staff');
     if (subcommand === 'status') return applicationService.showStatus(interaction, database);
     if (subcommand === 'forms') return applicationService.showForms(interaction, database);
@@ -60,4 +102,6 @@ module.exports = {
       return interaction.reply({ content: `✅ **${form.name}** application panel posted.`, flags: MessageFlags.Ephemeral });
     }
   },
+
+  buildEasyPanel,
 };
