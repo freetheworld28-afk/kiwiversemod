@@ -1,20 +1,36 @@
 'use strict';
 
 const http = require('http');
+const crypto = require('crypto');
 const { URL } = require('url');
+const { PermissionFlagsBits } = require('discord.js');
 
 let server = null;
 const startedAt = Date.now();
+const oauthStates = new Map();
+const sessions = new Map();
+
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 function sendJson(res, status, payload, origin = '*') {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Methods': 'GET, PATCH, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, PATCH, POST, OPTIONS',
     'Cache-Control': 'no-store',
+    Vary: 'Origin',
   });
   res.end(JSON.stringify(payload));
+}
+
+function redirect(res, location) {
+  res.writeHead(302, {
+    Location: location,
+    'Cache-Control': 'no-store',
+  });
+  res.end();
 }
 
 function getAllowedOrigin(req) {
@@ -24,11 +40,46 @@ function getAllowedOrigin(req) {
   return requestOrigin === configured ? configured : 'null';
 }
 
-function isAuthorized(req) {
-  const key = process.env.DASHBOARD_API_KEY;
-  if (!key) return false;
+function getPublicBaseUrl(req) {
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+function cleanExpiredAuth() {
+  const now = Date.now();
+  for (const [state, expiresAt] of oauthStates.entries()) {
+    if (expiresAt <= now) oauthStates.delete(state);
+  }
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt <= now) sessions.delete(token);
+  }
+}
+
+function getBearerToken(req) {
   const header = req.headers.authorization || '';
-  return header === `Bearer ${key}`;
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match ? match[1] : null;
+}
+
+function getAuthorizedSession(req) {
+  cleanExpiredAuth();
+  const token = getBearerToken(req);
+  if (!token) return null;
+
+  const session = sessions.get(token);
+  if (session && session.expiresAt > Date.now()) {
+    session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return { token, session, type: 'session' };
+  }
+
+  // Optional server-to-server/admin fallback. Never expose this key in browser code.
+  const apiKey = process.env.DASHBOARD_API_KEY;
+  if (apiKey && token === apiKey) {
+    return { token, session: { user: null }, type: 'apiKey' };
+  }
+
+  return null;
 }
 
 async function readJson(req) {
@@ -120,19 +171,148 @@ async function patchConfig(db, guildId, updates) {
   return getConfig(db, guildId);
 }
 
+async function isDashboardAdmin(guild, discordUser) {
+  const explicitlyAllowed = (process.env.DASHBOARD_ALLOWED_USER_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  if (explicitlyAllowed.includes(discordUser.id)) return true;
+  if (!guild) return false;
+  if (guild.ownerId === discordUser.id) return true;
+
+  const member = await guild.members.fetch(discordUser.id).catch(() => null);
+  if (!member) return false;
+  return member.permissions.has(PermissionFlagsBits.Administrator)
+    || member.permissions.has(PermissionFlagsBits.ManageGuild);
+}
+
+async function handleDiscordLogin(req, res) {
+  if (!process.env.CLIENT_ID || !process.env.DISCORD_CLIENT_SECRET) {
+    return sendJson(res, 503, { error: 'Discord OAuth is not configured' });
+  }
+
+  cleanExpiredAuth();
+  const state = crypto.randomBytes(24).toString('hex');
+  oauthStates.set(state, Date.now() + OAUTH_STATE_TTL_MS);
+
+  const redirectUri = `${getPublicBaseUrl(req)}/auth/discord/callback`;
+  const authorizeUrl = new URL('https://discord.com/oauth2/authorize');
+  authorizeUrl.searchParams.set('client_id', process.env.CLIENT_ID);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+  authorizeUrl.searchParams.set('scope', 'identify');
+  authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('prompt', 'consent');
+
+  return redirect(res, authorizeUrl.toString());
+}
+
+async function handleDiscordCallback(req, res, client, url) {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const expectedExpiry = state ? oauthStates.get(state) : null;
+
+  if (!code || !state || !expectedExpiry || expectedExpiry <= Date.now()) {
+    if (state) oauthStates.delete(state);
+    return sendJson(res, 400, { error: 'Invalid or expired OAuth state' });
+  }
+  oauthStates.delete(state);
+
+  const redirectUri = `${getPublicBaseUrl(req)}/auth/discord/callback`;
+  const tokenBody = new URLSearchParams({
+    client_id: process.env.CLIENT_ID,
+    client_secret: process.env.DISCORD_CLIENT_SECRET,
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri,
+  });
+
+  const tokenResponse = await fetch('https://discord.com/api/v10/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: tokenBody,
+  });
+
+  if (!tokenResponse.ok) {
+    console.error('Discord OAuth token exchange failed:', tokenResponse.status, await tokenResponse.text());
+    return sendJson(res, 502, { error: 'Discord OAuth token exchange failed' });
+  }
+
+  const tokenData = await tokenResponse.json();
+  const userResponse = await fetch('https://discord.com/api/v10/users/@me', {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+
+  if (!userResponse.ok) {
+    return sendJson(res, 502, { error: 'Could not load Discord user' });
+  }
+
+  const discordUser = await userResponse.json();
+  const guild = getGuild(client);
+  const allowed = await isDashboardAdmin(guild, discordUser);
+  if (!allowed) {
+    return sendJson(res, 403, { error: 'You are not allowed to manage this KiwiVerse server' });
+  }
+
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  sessions.set(sessionToken, {
+    user: {
+      id: discordUser.id,
+      username: discordUser.username,
+      globalName: discordUser.global_name || null,
+      avatar: discordUser.avatar || null,
+    },
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  });
+
+  const dashboardOrigin = (process.env.DASHBOARD_ORIGIN || '').replace(/\/$/, '');
+  if (!dashboardOrigin || dashboardOrigin === '*') {
+    return sendJson(res, 500, { error: 'DASHBOARD_ORIGIN must be set to the live dashboard URL' });
+  }
+
+  // Fragment values are not sent to Base44's server. The frontend should save this
+  // short-lived user session token to sessionStorage and immediately clear the hash.
+  return redirect(res, `${dashboardOrigin}/#kiwiverse_session=${encodeURIComponent(sessionToken)}`);
+}
+
 async function handleRequest(req, res, client, database) {
   const origin = getAllowedOrigin(req);
   if (req.method === 'OPTIONS') return sendJson(res, 204, {}, origin);
 
-  if (!isAuthorized(req)) {
-    return sendJson(res, 401, { error: 'Unauthorized' }, origin);
-  }
-
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const guild = getGuild(client);
-  const db = await database;
 
   try {
+    if (req.method === 'GET' && url.pathname === '/auth/discord') {
+      return handleDiscordLogin(req, res);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/auth/discord/callback') {
+      return handleDiscordCallback(req, res, client, url);
+    }
+
+    const auth = getAuthorizedSession(req);
+    if (!auth) {
+      return sendJson(res, 401, { error: 'Unauthorized', loginUrl: '/auth/discord' }, origin);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/auth/logout') {
+      if (auth.type === 'session') sessions.delete(auth.token);
+      return sendJson(res, 200, { ok: true }, origin);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/me') {
+      return sendJson(res, 200, {
+        authenticated: true,
+        authType: auth.type,
+        user: auth.session.user,
+        expiresAt: auth.type === 'session' ? auth.session.expiresAt : null,
+      }, origin);
+    }
+
+    const guild = getGuild(client);
+    const db = await database;
+
     if (req.method === 'GET' && url.pathname === '/api/status') {
       return sendJson(res, 200, {
         ok: true,
@@ -260,8 +440,8 @@ function startApiServer(client, database) {
   if (server) return server;
   const port = Number(process.env.API_PORT || process.env.PORT || 3000);
 
-  if (!process.env.DASHBOARD_API_KEY) {
-    console.warn('⚠️ DASHBOARD_API_KEY is missing; dashboard API will reject all requests.');
+  if (!process.env.DISCORD_CLIENT_SECRET) {
+    console.warn('⚠️ DISCORD_CLIENT_SECRET is missing; dashboard Discord login will not work.');
   }
 
   server = http.createServer((req, res) => handleRequest(req, res, client, database));
