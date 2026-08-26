@@ -58,6 +58,8 @@ async function candidatesFromTrackedInvites(database, guildId, codes) {
 
 async function fetchAllMembers(guild) {
   try {
+    // With the Server Members Intent enabled, this requests the complete guild
+    // member list instead of relying on the partial cache from startup.
     await guild.members.fetch();
     return { ok: true };
   } catch (error) {
@@ -68,11 +70,38 @@ async function fetchAllMembers(guild) {
 
 function candidatesFromWindow(guild, startMs, endMs, onlyEveryone) {
   const rows = [];
+  const stats = {
+    fetched: guild.members.cache.size,
+    inWindow: 0,
+    botsInWindow: 0,
+    excludedByRole: 0,
+    excludedNotKickable: 0,
+    protected: 0,
+    final: 0,
+  };
+
   for (const member of guild.members.cache.values()) {
-    if (member.user.bot) continue;
     if (!member.joinedTimestamp) continue;
     if (member.joinedTimestamp < startMs || member.joinedTimestamp > endMs) continue;
-    if (onlyEveryone && member.roles.cache.size !== 1) continue;
+
+    stats.inWindow += 1;
+
+    if (member.user.bot) {
+      stats.botsInWindow += 1;
+      continue;
+    }
+
+    // Never allow the bot to remove the server owner or the administrator
+    // who started this operation; those are handled by buildCandidateSet.
+    if (onlyEveryone && member.roles.cache.size !== 1) {
+      stats.excludedByRole += 1;
+      continue;
+    }
+
+    if (!member.kickable) {
+      stats.excludedNotKickable += 1;
+      continue;
+    }
 
     rows.push({
       userId: member.id,
@@ -81,13 +110,17 @@ function candidatesFromWindow(guild, startMs, endMs, onlyEveryone) {
       roleCount: member.roles.cache.size,
     });
   }
-  return rows;
+
+  stats.final = rows.length;
+  return { rows, stats };
 }
 
 async function buildCandidateSet(interaction, database) {
   const maliciousBotId = interaction.options.getString('bot_id');
   const anyBot = interaction.options.getBoolean('any_bot') ?? false;
-  const onlyEveryone = interaction.options.getBoolean('only_everyone') ?? true;
+  // IMPORTANT: role filtering is now opt-in. Raid cleanup should not silently
+  // discard legitimate raid accounts merely because an auto-role was assigned.
+  const onlyEveryone = interaction.options.getBoolean('only_everyone') ?? false;
   const start = interaction.options.getString('start');
   const end = interaction.options.getString('end');
 
@@ -97,6 +130,15 @@ async function buildCandidateSet(interaction, database) {
 
   let candidates = await candidatesFromTrackedInvites(database, interaction.guild.id, codes);
   let mode = codes.size && candidates.length ? (anyBot ? 'all_bot_invites' : 'tracked_invites') : 'time_window';
+  let stats = {
+    fetched: interaction.guild.members.cache.size,
+    inWindow: 0,
+    botsInWindow: 0,
+    excludedByRole: 0,
+    excludedNotKickable: 0,
+    protected: 0,
+    final: candidates.length,
+  };
 
   // Fetch the complete member list ONCE. Historical cleanup can involve hundreds
   // of accounts; fetching each member individually is slow and can fail/rate-limit.
@@ -107,6 +149,7 @@ async function buildCandidateSet(interaction, database) {
       codes: Array.from(codes),
     };
   }
+  stats.fetched = interaction.guild.members.cache.size;
 
   if (!candidates.length) {
     const startMs = parseTimestamp(start);
@@ -120,18 +163,36 @@ async function buildCandidateSet(interaction, database) {
         codes: Array.from(codes),
       };
     }
-    candidates = candidatesFromWindow(interaction.guild, startMs, endMs, onlyEveryone);
+
+    const windowResult = candidatesFromWindow(interaction.guild, startMs, endMs, onlyEveryone);
+    candidates = windowResult.rows;
+    stats = windowResult.stats;
   }
 
   const unique = new Map();
   for (const row of candidates) {
-    if (row.userId === interaction.guild.ownerId || row.userId === interaction.user.id) continue;
+    if (row.userId === interaction.guild.ownerId || row.userId === interaction.user.id) {
+      stats.protected += 1;
+      continue;
+    }
     const member = interaction.guild.members.cache.get(row.userId);
-    if (!member || !member.kickable) continue;
+    if (!member || !member.kickable) {
+      stats.excludedNotKickable += 1;
+      continue;
+    }
     unique.set(row.userId, { ...row, member });
   }
 
-  return { mode, codes: Array.from(codes), candidates: Array.from(unique.values()), onlyEveryone };
+  stats.final = unique.size;
+  return {
+    mode,
+    codes: Array.from(codes),
+    candidates: Array.from(unique.values()),
+    onlyEveryone,
+    stats,
+    start,
+    end,
+  };
 }
 
 function addCommonOptions(sub) {
@@ -150,7 +211,7 @@ function addCommonOptions(sub) {
       .setDescription('Fallback raid end, ISO format'))
     .addBooleanOption((opt) => opt
       .setName('only_everyone')
-      .setDescription('Fallback: only match members with no roles besides @everyone (default true)'));
+      .setDescription('Fallback: ONLY match members with exactly @everyone (default false)'));
 }
 
 module.exports = {
@@ -202,14 +263,29 @@ module.exports = {
       ? 'Tracked joins through ANY bot-created invite'
       : result.mode === 'tracked_invites'
         ? 'Tracked invite attribution for selected bot'
-        : `Join-time fallback (${result.onlyEveryone ? '@everyone-only accounts' : 'all kickable human accounts in window'})`;
+        : `Join-time fallback (${result.onlyEveryone ? '@everyone-only accounts' : 'ALL kickable human accounts in window'})`;
 
     if (interaction.options.getSubcommand() === 'preview') {
+      const s = result.stats || {};
       const embed = new EmbedBuilder()
         .setColor(0xfee75c)
         .setTitle('🧹 Raid Cleanup Preview')
         .setDescription(`**Mode:** ${modeLabel}\n**Candidates:** ${result.candidates.length}\n**Bot-created invite codes found:** ${result.codes.length}`)
-        .addFields({ name: 'First candidates', value: sample.slice(0, 1024) })
+        .addFields(
+          {
+            name: '🔎 Scan breakdown',
+            value: [
+              `Members fetched: **${s.fetched ?? 0}**`,
+              `Joined in window: **${s.inWindow ?? 0}**`,
+              `Bots in window: **${s.botsInWindow ?? 0}**`,
+              `Excluded by role: **${s.excludedByRole ?? 0}**`,
+              `Not kickable: **${s.excludedNotKickable ?? 0}**`,
+              `Protected: **${s.protected ?? 0}**`,
+              `Final candidates: **${s.final ?? result.candidates.length}**`,
+            ].join('\n'),
+          },
+          { name: 'First candidates', value: sample.slice(0, 1024) },
+        )
         .setFooter({ text: 'Nothing has been kicked. Review the count and sample before running execute.' })
         .setTimestamp();
       return interaction.editReply({ embeds: [embed] });
