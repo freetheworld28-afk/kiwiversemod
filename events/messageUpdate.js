@@ -48,7 +48,7 @@ module.exports = {
         });
       }
 
-      await logsChannel.send({ embeds: [embed] }).catch(() => null);
+      await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post message-edit log:', error));
     } catch (error) {
       console.error('Error in messageUpdate:', error);
     }

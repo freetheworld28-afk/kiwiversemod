@@ -58,7 +58,7 @@ module.exports = {
           { name: 'Reason', value: reason },
           { name: 'Member DM', value: dm.delivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
         )
-        .setTimestamp()] }).catch(() => null);
+        .setTimestamp()] }).catch((error) => console.error('Failed to post warn log:', error));
     }
 
     return interaction.reply({ content: `⚠️ Warned **${target.tag}**. They now have **${row?.warnings || 1}** warning(s).`, flags: MessageFlags.Ephemeral });

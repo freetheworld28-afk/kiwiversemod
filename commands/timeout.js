@@ -45,7 +45,7 @@ async function logModAction(interaction, database, target, reason, duration, dmD
       { name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
     )
     .setTimestamp();
-  await logsChannel.send({ embeds: [embed] }).catch(() => null);
+  await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post timeout log:', error));
 }
 
 module.exports = {
