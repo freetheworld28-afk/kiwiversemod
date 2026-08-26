@@ -3,33 +3,25 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('help')
-    .setDescription('Get help with available commands'),
+    .setDescription('See KiwiVerse commands and systems'),
 
-  async execute(interaction, client, database, cache) {
-    const categories = {
-      '🛡️ Moderation': ['ban', 'kick', 'timeout'],
-      '💰 Economy': ['balance', 'daily'],
-      '🎮 Games': ['coinflip', 'dice'],
-      '👤 User': ['info', 'profile'],
-      '📋 Utility': ['help', 'suggestions'],
-    };
-
+  async execute(interaction) {
     const embed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle('🤖 KiwiVerse Bot Help')
-      .setDescription('Here are all available commands:');
-
-    for (const [category, commands] of Object.entries(categories)) {
-      embed.addFields({
-        name: category,
-        value: `\`${commands.join('` `')}\``,
-        inline: false,
-      });
-    }
-
-    embed.setFooter({ text: 'Use /command for more details' }).setTimestamp();
+      .setColor(0x8b5cf6)
+      .setTitle('🌟 KiwiVerse — All-in-One Bot')
+      .setDescription('Use the commands below to manage and use the server. Some management commands require staff permissions.')
+      .addFields(
+        { name: '🛡️ Moderation', value: '`/ban` `/kick` `/timeout` `/warn` `/warnings`' },
+        { name: '💰 Economy', value: '`/balance` `/daily` `/coinflip` `/dice` `/moneytop` `/shop`' },
+        { name: '📊 Leveling', value: '`/rank` `/leaderboard` `/profile`' },
+        { name: '🎫 Tickets & Applications', value: '`/ticket` `/apply`' },
+        { name: '🎟️ Invites & Events', value: '`/invites` `/inviteleaderboard` `/inviteevent`' },
+        { name: '🎮 Roblox', value: '`/roblox` — link and manage up to 10 Roblox accounts' },
+        { name: '🔧 Utility', value: '`/info` `/serverinfo` `/reminder` `/autoresponse` `/help`' },
+      )
+      .setFooter({ text: 'KiwiVerse • More modules are being added to the all-in-one system' })
+      .setTimestamp();
 
     return interaction.reply({ embeds: [embed] });
   },
 };
-
