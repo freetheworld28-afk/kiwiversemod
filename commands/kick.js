@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
+const { getLogChannel } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -18,10 +19,8 @@ function getStaffTier(member) {
   return highestTier;
 }
 
-async function logModAction(interaction, target, reason, dmDelivered) {
-  const logsChannel = interaction.guild.channels.cache.find(
-    (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
-  );
+async function logModAction(interaction, database, target, reason, dmDelivered) {
+  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
   if (!logsChannel) return;
 
   const embed = new EmbedBuilder()
@@ -44,7 +43,7 @@ module.exports = {
     .addUserOption((opt) => opt.setName('user').setDescription('Member to kick').setRequired(true))
     .addStringOption((opt) => opt.setName('reason').setDescription('Kick reason')),
 
-  async execute(interaction) {
+  async execute(interaction, client, database) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 1) {
       return interaction.reply({ content: '⛔ You need Moderator or higher to use this command.', flags: MessageFlags.Ephemeral });
@@ -67,7 +66,7 @@ module.exports = {
       });
 
       await member.kick(`${interaction.user.tag} | ${reason}`);
-      await logModAction(interaction, target, reason, dm.delivered);
+      await logModAction(interaction, database, target, reason, dm.delivered);
 
       return interaction.editReply({
         content: `👢 **${target.tag}** has been kicked.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,

@@ -1,4 +1,5 @@
 const { EmbedBuilder } = require('discord.js');
+const { getLogChannel } = require('../services/loggingService');
 
 const SLUR_FILTER = [
   'nigger',
@@ -43,9 +44,7 @@ module.exports = {
 
     await message.delete().catch(() => null);
 
-    const logsChannel = message.guild.channels.cache.find(
-      (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
-    );
+    const logsChannel = await getLogChannel(message.guild, database, 'member');
 
     if (logsChannel) {
       const embed = new EmbedBuilder()

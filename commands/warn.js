@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
+const { getLogChannel } = require('../services/loggingService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -45,7 +46,7 @@ module.exports = {
       ],
     });
 
-    const logs = interaction.guild.channels.cache.find((ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased());
+    const logs = await getLogChannel(interaction.guild, database, 'member');
     if (logs) {
       await logs.send({ embeds: [new EmbedBuilder()
         .setColor(0xfee75c)

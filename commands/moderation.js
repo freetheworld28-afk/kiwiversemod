@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
+const { getLogChannel } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -19,10 +20,8 @@ function getStaffTier(member) {
   return highestTier;
 }
 
-async function logModAction(interaction, action, target, reason, extraFields = [], dmDelivered = null) {
-  const logsChannel = interaction.guild.channels.cache.find(
-    (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
-  );
+async function logModAction(interaction, database, action, target, reason, extraFields = [], dmDelivered = null) {
+  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
 
   if (logsChannel) {
     const embed = new EmbedBuilder()
@@ -52,7 +51,7 @@ module.exports = {
       opt.setName('days').setDescription('Delete messages from this many days back').setMinValue(0).setMaxValue(7),
     ),
 
-  async execute(interaction) {
+  async execute(interaction, client, database) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 2) {
       return interaction.reply({
@@ -81,7 +80,7 @@ module.exports = {
         reason: `${interaction.user.tag} | ${reason}`,
       });
 
-      await logModAction(interaction, 'Ban', target, reason, [
+      await logModAction(interaction, database, 'Ban', target, reason, [
         { name: 'Message Purge', value: `${purgeDays} day(s)`, inline: true },
       ], dm.delivered);
 

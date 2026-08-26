@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
+const { getLogChannel } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -29,10 +30,8 @@ function formatDuration(ms) {
   return `${seconds} second${seconds > 1 ? 's' : ''}`;
 }
 
-async function logModAction(interaction, target, reason, duration, dmDelivered) {
-  const logsChannel = interaction.guild.channels.cache.find(
-    (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
-  );
+async function logModAction(interaction, database, target, reason, duration, dmDelivered) {
+  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
   if (!logsChannel) return;
 
   const embed = new EmbedBuilder()
@@ -73,7 +72,7 @@ module.exports = {
     )
     .addStringOption((opt) => opt.setName('reason').setDescription('Timeout reason')),
 
-  async execute(interaction) {
+  async execute(interaction, client, database) {
     const memberTier = getStaffTier(interaction.member);
     if (memberTier === null || memberTier < 0) {
       return interaction.reply({ content: '⛔ You need Trial Mod or higher to use this command.', flags: MessageFlags.Ephemeral });
@@ -101,7 +100,7 @@ module.exports = {
       });
 
       await member.timeout(durationMs, `${interaction.user.tag} | ${reason}`);
-      await logModAction(interaction, target, reason, durationStr, dm.delivered);
+      await logModAction(interaction, database, target, reason, durationStr, dm.delivered);
 
       return interaction.editReply({
         content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
