@@ -134,13 +134,16 @@ module.exports = {
     .addSubcommand((sub) => addCommonOptions(sub
       .setName('preview')
       .setDescription('Preview accounts that would be removed')))
-    .addSubcommand((sub) => addCommonOptions(sub
-      .setName('execute')
-      .setDescription('Bulk kick the previewed raid accounts'))
-      .addStringOption((opt) => opt
-        .setName('confirm')
-        .setDescription('Type KICK to confirm mass removal')
-        .setRequired(true))),
+    .addSubcommand((sub) => {
+      sub
+        .setName('execute')
+        .setDescription('Bulk kick the previewed raid accounts')
+        .addStringOption((opt) => opt
+          .setName('confirm')
+          .setDescription('Type KICK to confirm mass removal')
+          .setRequired(true));
+      return addCommonOptions(sub);
+    }),
 
   async execute(interaction, client, database) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
