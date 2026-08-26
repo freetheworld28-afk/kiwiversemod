@@ -16,16 +16,33 @@ function parseTimestamp(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-async function getBotCreatedInviteCodes(guild, maliciousBotId) {
+async function getBotCreatedInviteCodes(guild, maliciousBotId = null) {
   const codes = new Set();
-  const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.InviteCreate, limit: 100 }).catch(() => null);
-  if (!logs) return codes;
 
-  for (const entry of logs.entries.values()) {
-    if (entry.executorId !== maliciousBotId) continue;
-    const code = entry.target?.code || entry.changes?.find?.((c) => c.key === 'code')?.new;
-    if (code) codes.add(String(code));
+  // Current invites are the strongest source because Discord exposes the inviter.
+  const currentInvites = await guild.invites.fetch().catch(() => null);
+  if (currentInvites) {
+    for (const invite of currentInvites.values()) {
+      const inviter = invite.inviter;
+      if (!inviter?.bot) continue;
+      if (maliciousBotId && inviter.id !== maliciousBotId) continue;
+      codes.add(String(invite.code));
+    }
   }
+
+  // Also inspect recent invite-create audit log entries for deleted/expired invites.
+  const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.InviteCreate, limit: 100 }).catch(() => null);
+  if (logs) {
+    for (const entry of logs.entries.values()) {
+      const executor = entry.executor;
+      const executorIsBot = executor?.bot === true;
+      if (!executorIsBot) continue;
+      if (maliciousBotId && entry.executorId !== maliciousBotId) continue;
+      const code = entry.target?.code || entry.changes?.find?.((c) => c.key === 'code')?.new;
+      if (code) codes.add(String(code));
+    }
+  }
+
   return codes;
 }
 
@@ -49,30 +66,39 @@ async function candidatesFromWindow(guild, startMs, endMs) {
       if (member.user.bot) return false;
       if (!member.joinedTimestamp) return false;
       if (member.joinedTimestamp < startMs || member.joinedTimestamp > endMs) return false;
-      return member.roles.cache.size === 1; // @everyone only
+      return member.roles.cache.size === 1;
     })
     .map((member) => ({ userId: member.id, joinedAt: new Date(member.joinedTimestamp).toISOString(), inviteCode: null }));
 }
 
 async function buildCandidateSet(interaction, database) {
   const maliciousBotId = interaction.options.getString('bot_id');
+  const anyBot = interaction.options.getBoolean('any_bot') ?? false;
   const start = interaction.options.getString('start');
   const end = interaction.options.getString('end');
 
-  const codes = maliciousBotId ? await getBotCreatedInviteCodes(interaction.guild, maliciousBotId) : new Set();
+  const codes = (anyBot || maliciousBotId)
+    ? await getBotCreatedInviteCodes(interaction.guild, anyBot ? null : maliciousBotId)
+    : new Set();
+
   let candidates = await candidatesFromTrackedInvites(database, interaction.guild.id, codes);
-  let mode = codes.size && candidates.length ? 'tracked_invites' : 'time_window';
+  let mode = codes.size && candidates.length ? (anyBot ? 'all_bot_invites' : 'tracked_invites') : 'time_window';
 
   if (!candidates.length) {
     const startMs = parseTimestamp(start);
     const endMs = parseTimestamp(end);
     if (!startMs || !endMs || startMs > endMs) {
-      return { error: 'No tracked raid invites were found. For the fallback, provide valid ISO timestamps for `start` and `end`.' };
+      const scope = anyBot
+        ? 'bot-created invite codes were found, but KiwiVerse has no stored member-to-invite attribution for those historical joins'
+        : 'no tracked raid invites were found';
+      return {
+        error: `${scope}. Discord does not expose a historical member→invite lookup after the fact. Provide a safe fallback \`start\` and \`end\` window if you want to scan @everyone-only accounts from that period.`,
+        codes: Array.from(codes),
+      };
     }
     candidates = await candidatesFromWindow(interaction.guild, startMs, endMs);
   }
 
-  // Never act on the guild owner, the invoking admin, or accounts the bot cannot kick.
   const unique = new Map();
   for (const row of candidates) {
     if (row.userId === interaction.guild.ownerId || row.userId === interaction.user.id) continue;
@@ -84,24 +110,37 @@ async function buildCandidateSet(interaction, database) {
   return { mode, codes: Array.from(codes), candidates: Array.from(unique.values()) };
 }
 
+function addCommonOptions(sub) {
+  return sub
+    .addBooleanOption((opt) => opt
+      .setName('any_bot')
+      .setDescription('Match joins through invites created by ANY bot account'))
+    .addStringOption((opt) => opt
+      .setName('bot_id')
+      .setDescription('Optional: only invites created by this specific bot ID'))
+    .addStringOption((opt) => opt
+      .setName('start')
+      .setDescription('Fallback raid start, ISO format e.g. 2026-08-26T01:00:00Z'))
+    .addStringOption((opt) => opt
+      .setName('end')
+      .setDescription('Fallback raid end, ISO format e.g. 2026-08-26T01:10:00Z'));
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('raidcleanup')
     .setDescription('Preview or remove accounts linked to a bot-driven raid')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand((sub) => sub
+    .addSubcommand((sub) => addCommonOptions(sub
       .setName('preview')
-      .setDescription('Preview accounts that would be removed')
-      .addStringOption((opt) => opt.setName('bot_id').setDescription('Malicious bot user ID that created the raid invites'))
-      .addStringOption((opt) => opt.setName('start').setDescription('Fallback raid start, ISO format e.g. 2026-08-26T01:00:00Z'))
-      .addStringOption((opt) => opt.setName('end').setDescription('Fallback raid end, ISO format e.g. 2026-08-26T01:10:00Z')))
-    .addSubcommand((sub) => sub
+      .setDescription('Preview accounts that would be removed')))
+    .addSubcommand((sub) => addCommonOptions(sub
       .setName('execute')
-      .setDescription('Bulk kick the previewed raid accounts')
-      .addStringOption((opt) => opt.setName('bot_id').setDescription('Malicious bot user ID that created the raid invites'))
-      .addStringOption((opt) => opt.setName('start').setDescription('Fallback raid start, ISO format e.g. 2026-08-26T01:00:00Z'))
-      .addStringOption((opt) => opt.setName('end').setDescription('Fallback raid end, ISO format e.g. 2026-08-26T01:10:00Z'))
-      .addStringOption((opt) => opt.setName('confirm').setDescription('Type KICK to confirm mass removal').setRequired(true))),
+      .setDescription('Bulk kick the previewed raid accounts'))
+      .addStringOption((opt) => opt
+        .setName('confirm')
+        .setDescription('Type KICK to confirm mass removal')
+        .setRequired(true))),
 
   async execute(interaction, client, database) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -110,18 +149,28 @@ module.exports = {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const result = await buildCandidateSet(interaction, database);
-    if (result.error) return interaction.editReply({ content: `⚠️ ${result.error}` });
+    if (result.error) {
+      const codeNote = result.codes?.length ? `\n🤖 Bot-created invite codes still visible: **${result.codes.length}**` : '';
+      return interaction.editReply({ content: `⚠️ ${result.error}${codeNote}` });
+    }
 
-    const sample = result.candidates.slice(0, 20).map((c) => `• <@${c.userId}>${c.inviteCode ? ` via \`${c.inviteCode}\`` : ''}`).join('\n') || 'None';
-    const modeLabel = result.mode === 'tracked_invites' ? 'Tracked invite attribution' : 'Join-time fallback (@everyone-only accounts)';
+    const sample = result.candidates.slice(0, 20)
+      .map((c) => `• <@${c.userId}>${c.inviteCode ? ` via \`${c.inviteCode}\`` : ''}`)
+      .join('\n') || 'None';
+
+    const modeLabel = result.mode === 'all_bot_invites'
+      ? 'Tracked joins through ANY bot-created invite'
+      : result.mode === 'tracked_invites'
+        ? 'Tracked invite attribution for selected bot'
+        : 'Join-time fallback (@everyone-only accounts)';
 
     if (interaction.options.getSubcommand() === 'preview') {
       const embed = new EmbedBuilder()
         .setColor(0xfee75c)
         .setTitle('🧹 Raid Cleanup Preview')
-        .setDescription(`**Mode:** ${modeLabel}\n**Candidates:** ${result.candidates.length}\n**Raid invite codes found:** ${result.codes.length}`)
+        .setDescription(`**Mode:** ${modeLabel}\n**Candidates:** ${result.candidates.length}\n**Bot-created invite codes found:** ${result.codes.length}`)
         .addFields({ name: 'First candidates', value: sample.slice(0, 1024) })
-        .setFooter({ text: 'Nothing has been kicked. Run /raidcleanup execute with confirm:KICK after reviewing.' })
+        .setFooter({ text: 'Nothing has been kicked. Review this list before running execute.' })
         .setTimestamp();
       return interaction.editReply({ embeds: [embed] });
     }
@@ -155,7 +204,7 @@ module.exports = {
         { name: 'Failed', value: String(failed.length), inline: true },
         { name: 'Matched', value: String(result.candidates.length), inline: true },
       )
-      .setFooter({ text: 'Discord.js handles API rate-limit queues; KiwiVerse also spaces kick requests.' })
+      .setFooter({ text: 'KiwiVerse spaces kick requests to avoid hammering the Discord API.' })
       .setTimestamp();
 
     return interaction.editReply({ embeds: [embed] });
