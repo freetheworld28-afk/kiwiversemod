@@ -60,7 +60,7 @@ module.exports = {
         .setFooter({ text: 'Deleted automatically' })
         .setTimestamp();
 
-      await logsChannel.send({ embeds: [embed] }).catch(() => null);
+      await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post content-filter log:', error));
     }
   },
 };

@@ -37,7 +37,7 @@ async function logModAction(interaction, database, action, target, reason, extra
       .setFooter({ text: `Actioned by ${interaction.user.tag}` })
       .setTimestamp();
 
-    await logsChannel.send({ embeds: [embed] }).catch(() => null);
+    await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post ban log:', error));
   }
 }
 
