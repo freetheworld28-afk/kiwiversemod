@@ -11,7 +11,7 @@ module.exports = {
     const db = await database;
 
     const user = await db.get('SELECT * FROM users WHERE discord_id = ?', [target.id]);
-    const balance = user?.balance || 1000;
+    const balance = user?.balance ?? 1000;
 
     const embed = new EmbedBuilder()
       .setColor(0x57f287)

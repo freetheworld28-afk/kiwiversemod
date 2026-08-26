@@ -20,7 +20,7 @@ module.exports = {
     const db = await database;
 
     const user = await db.get('SELECT * FROM users WHERE discord_id = ?', [interaction.user.id]);
-    const balance = user?.balance || 1000;
+    const balance = user?.balance ?? 1000;
 
     if (balance < amount) {
       return interaction.reply({

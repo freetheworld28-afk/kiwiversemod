@@ -19,7 +19,7 @@ module.exports = {
       .addFields(
         { name: 'Level', value: `${userData?.level || 0}`, inline: true },
         { name: 'XP', value: `${userData?.xp || 0}`, inline: true },
-        { name: 'Balance', value: `${userData?.balance || 1000} 🪙`, inline: true },
+        { name: 'Balance', value: `${userData?.balance ?? 1000} 🪙`, inline: true },
         { name: 'Warnings', value: `${userData?.warnings || 0}`, inline: true },
         {
           name: 'Member Since',

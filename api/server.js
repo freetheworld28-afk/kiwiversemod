@@ -75,8 +75,12 @@ function getAuthorizedSession(req) {
 
   // Optional server-to-server/admin fallback. Never expose this key in browser code.
   const apiKey = process.env.DASHBOARD_API_KEY;
-  if (apiKey && token === apiKey) {
-    return { token, session: { user: null }, type: 'apiKey' };
+  if (apiKey) {
+    const provided = Buffer.from(token);
+    const expected = Buffer.from(apiKey);
+    if (provided.length === expected.length && crypto.timingSafeEqual(provided, expected)) {
+      return { token, session: { user: null }, type: 'apiKey' };
+    }
   }
 
   return null;
