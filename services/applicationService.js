@@ -242,6 +242,7 @@ async function submitApplication(interaction, database, slug = 'staff') {
       permissionOverwrites: [
         { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
         { id: interaction.client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        ...reviewerRoleIds().map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
       ],
       reason: 'KiwiVerse application review channel',
     }).catch(() => null);

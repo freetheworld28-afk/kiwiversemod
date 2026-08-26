@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { applyBalanceDelta } = require('../services/economyService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -17,26 +18,26 @@ module.exports = {
   async execute(interaction, client, database, cache) {
     const amount = interaction.options.getInteger('amount');
     const choice = interaction.options.getString('choice');
-    const db = await database;
 
-    const user = await db.get('SELECT * FROM users WHERE discord_id = ?', [interaction.user.id]);
-    const balance = user?.balance || 1000;
-
-    if (balance < amount) {
+    // Debit the bet up front - refused atomically if the balance can't cover
+    // it, so a broke user can't win a bet they were never able to place.
+    const debit = await applyBalanceDelta(database, interaction.guild.id, interaction.user.id, interaction.user.username, -amount);
+    if (!debit.applied) {
       return interaction.reply({
-        content: `❌ You don't have enough coins! You have **${balance}** 🪙`,
+        content: `❌ You don't have enough coins! You have **${debit.balance}** 🪙`,
         flags: MessageFlags.Ephemeral,
       });
     }
 
     const result = Math.random() > 0.5 ? 'heads' : 'tails';
     const won = choice === result;
-    const newBalance = won ? balance + amount : balance - amount;
 
-    await db.run(
-      `INSERT INTO users (discord_id, balance) VALUES (?, ?) ON CONFLICT(discord_id) DO UPDATE SET balance = excluded.balance`,
-      [interaction.user.id, newBalance],
-    );
+    let newBalance = debit.balance;
+    if (won) {
+      // Return the stake plus the winnings.
+      const credit = await applyBalanceDelta(database, interaction.guild.id, interaction.user.id, interaction.user.username, amount * 2);
+      newBalance = credit.balance;
+    }
 
     const embed = new EmbedBuilder()
       .setColor(won ? 0x57f287 : 0xed4245)
@@ -52,4 +53,3 @@ module.exports = {
     return interaction.reply({ embeds: [embed] });
   },
 };
-

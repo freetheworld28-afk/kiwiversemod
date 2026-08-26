@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { applyBalanceDelta } = require('../services/economyService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -12,22 +13,25 @@ module.exports = {
   async execute(interaction, client, database) {
     const amount = interaction.options.getInteger('amount');
     const guess = interaction.options.getInteger('guess');
-    const db = await database;
-    const row = await db.get('SELECT balance FROM users WHERE discord_id = ?', interaction.user.id);
-    const balance = row?.balance ?? 1000;
-    if (amount > balance) return interaction.reply({ content: `❌ You only have **${balance}** 🪙.`, flags: MessageFlags.Ephemeral });
+
+    // Debit the bet up front - refused atomically if the balance can't cover
+    // it, so a broke user can't win a bet they were never able to place.
+    const debit = await applyBalanceDelta(database, interaction.guild.id, interaction.user.id, interaction.user.username, -amount);
+    if (!debit.applied) {
+      return interaction.reply({ content: `❌ You only have **${debit.balance}** 🪙.`, flags: MessageFlags.Ephemeral });
+    }
 
     const rolled = Math.floor(Math.random() * 6) + 1;
     const won = rolled === guess;
-    const change = won ? amount * 5 : -amount;
-    const newBalance = balance + change;
-    await db.run(
-      `INSERT INTO users (discord_id, username, balance) VALUES (?, ?, ?)
-       ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, balance = excluded.balance`,
-      interaction.user.id,
-      interaction.user.username,
-      newBalance,
-    );
+
+    let newBalance = debit.balance;
+    let change = -amount;
+    if (won) {
+      // Return the stake plus 5x winnings.
+      change = amount * 5;
+      const credit = await applyBalanceDelta(database, interaction.guild.id, interaction.user.id, interaction.user.username, amount + change);
+      newBalance = credit.balance;
+    }
 
     return interaction.reply({ embeds: [new EmbedBuilder()
       .setColor(won ? 0x57f287 : 0xed4245)

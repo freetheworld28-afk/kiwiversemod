@@ -22,7 +22,7 @@ const DEFAULT_SETTINGS = {
   'automod.massMentionProtection': false,
   'automod.capsProtection': false,
 
-  'logging.enabled': false,
+  'logging.enabled': true,
   'logging.channelId': null,
   'logging.messageDelete': true,
   'logging.messageEdit': true,

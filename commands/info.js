@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { getStartingBalance } = require('../services/economyService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -11,6 +12,7 @@ module.exports = {
     const db = await database;
 
     const userData = await db.get('SELECT * FROM users WHERE discord_id = ?', [target.id]);
+    const balance = userData?.balance ?? (await getStartingBalance(database, interaction.guild.id));
 
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
@@ -19,7 +21,7 @@ module.exports = {
       .addFields(
         { name: 'Level', value: `${userData?.level || 0}`, inline: true },
         { name: 'XP', value: `${userData?.xp || 0}`, inline: true },
-        { name: 'Balance', value: `${userData?.balance || 1000} 🪙`, inline: true },
+        { name: 'Balance', value: `${balance} 🪙`, inline: true },
         { name: 'Warnings', value: `${userData?.warnings || 0}`, inline: true },
         {
           name: 'Member Since',
