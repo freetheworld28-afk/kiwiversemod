@@ -125,9 +125,17 @@ Edit `.env` to customize:
 - `/info [user]` - Get user profile info
 - `/profile` - View your profile
 
+### Community
+- `/giveaway start <prize> <duration> [winners] [channel]` - Start a giveaway
+- `/giveaway end <id>` - End a giveaway early and draw winners
+- `/giveaway reroll <id>` - Reroll winners for an ended giveaway
+- `/suggest <idea>` - Submit a suggestion for members to vote on
+- `/reactionrole add <message_id> <emoji> <role> [channel]` - Bind a reaction to a role
+- `/reactionrole remove <message_id> <emoji>` - Remove a reaction role binding
+- `/reactionrole list <message_id>` - List reaction role bindings on a message
+
 ### Utility
 - `/help` - Show all available commands
-- `/suggestions` - Submit a suggestion
 
 ## 🗄️ Database
 

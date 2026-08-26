@@ -15,6 +15,7 @@ module.exports = {
         { name: '💰 Economy', value: '`/balance` `/daily` `/coinflip` `/dice` `/moneytop` `/shop`' },
         { name: '📊 Leveling', value: '`/rank` `/leaderboard` `/profile`' },
         { name: '🎫 Tickets & Applications', value: '`/ticket` `/apply`' },
+        { name: '🎉 Community', value: '`/giveaway` `/suggest` `/reactionrole` — plus starboard, set up via the dashboard' },
         { name: '🎟️ Invites & Events', value: '`/invites` `/inviteleaderboard` `/inviteevent`' },
         { name: '🎮 Roblox', value: '`/roblox` — link and manage up to 10 Roblox accounts' },
         { name: '🔧 Utility', value: '`/info` `/serverinfo` `/reminder` `/autoresponse` `/help`' },

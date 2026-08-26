@@ -3,6 +3,7 @@ const { initDashboardSchema } = require('../api/init.js');
 const { startApiServer } = require('../api/server.js');
 const inviteTracker = require('../services/inviteTrackerService');
 const reminderService = require('../services/reminderService');
+const giveawayService = require('../services/giveawayService');
 
 module.exports = {
   name: Events.ClientReady,
@@ -22,6 +23,12 @@ module.exports = {
     // Restore persistent reminders after restarts/deploys.
     await reminderService.initialize(client, database).catch((error) => {
       console.error('Reminder scheduler init failed:', error);
+    });
+
+    // Resume any giveaways still running (schedules their end, or ends them
+    // immediately if their timer already elapsed while the bot was offline).
+    await giveawayService.initialize(client, database).catch((error) => {
+      console.error('Giveaway scheduler init failed:', error);
     });
 
     // Snapshot current invite use counts so new joins can be attributed.

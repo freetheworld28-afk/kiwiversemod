@@ -3,6 +3,8 @@ const ticketService = require('../services/ticketService');
 const applicationService = require('../services/applicationService');
 const inviteTracker = require('../services/inviteTrackerService');
 const inviteEventCommand = require('../commands/inviteevent');
+const suggestionService = require('../services/suggestionService');
+const giveawayService = require('../services/giveawayService');
 
 module.exports = {
   name: Events.InteractionCreate,
@@ -111,6 +113,21 @@ module.exports = {
 
       if (interaction.isButton() && interaction.customId === 'inviteevent_easy_end') {
         await inviteEventCommand.endCurrentEvent(interaction, database, true);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
+        await giveawayService.toggleEntry(interaction, database);
+        return;
+      }
+
+      if (interaction.isButton() && (interaction.customId.startsWith('suggestion_up:') || interaction.customId.startsWith('suggestion_down:'))) {
+        await suggestionService.handleVote(interaction, database);
+        return;
+      }
+
+      if (interaction.isButton() && (interaction.customId.startsWith('suggestion_approve:') || interaction.customId.startsWith('suggestion_deny:') || interaction.customId.startsWith('suggestion_implement:'))) {
+        await suggestionService.handleModeration(interaction, database);
         return;
       }
 
