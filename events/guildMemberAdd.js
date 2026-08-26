@@ -1,5 +1,6 @@
 const { Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const inviteTracker = require('../services/inviteTrackerService');
+const { getLogChannel } = require('../services/loggingService');
 
 module.exports = {
   name: Events.GuildMemberAdd,
@@ -54,9 +55,7 @@ module.exports = {
             SendMessages: false,
           });
 
-          const logsChannel = member.guild.channels.cache.find(
-            (ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased(),
-          );
+          const logsChannel = await getLogChannel(member.guild, database, 'member');
           if (logsChannel) {
             const raidEmbed = new EmbedBuilder()
               .setColor(0xed4245)
