@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { getStartingBalance } = require('../services/economyService');
 
 const ITEMS = {
   'xp-boost': { name: 'XP Boost', price: 1500, description: 'A collectible XP boost token for future perks.' },
@@ -50,15 +51,29 @@ module.exports = {
 
     const itemId = interaction.options.getString('item');
     const item = ITEMS[itemId];
-    const row = await db.get('SELECT balance FROM users WHERE discord_id = ?', interaction.user.id);
-    const balance = row?.balance ?? 1000;
-    if (balance < item.price) return interaction.reply({ content: `❌ You need **${item.price.toLocaleString()}** 🪙 but only have **${balance.toLocaleString()}**.`, flags: MessageFlags.Ephemeral });
+    const startingBalance = await getStartingBalance(database, interaction.guild.id);
 
-    const newBalance = balance - item.price;
     await db.exec('BEGIN');
     try {
       await db.run(`INSERT INTO users (discord_id, username, balance) VALUES (?, ?, ?)
-        ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, balance = excluded.balance`, interaction.user.id, interaction.user.username, newBalance);
+        ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username`, interaction.user.id, interaction.user.username, startingBalance);
+
+      // Guarded in the UPDATE itself so the affordability check can't lose a
+      // race against a concurrent purchase draining the same balance.
+      const debit = await db.run(
+        'UPDATE users SET balance = balance - ? WHERE discord_id = ? AND balance >= ?',
+        item.price,
+        interaction.user.id,
+        item.price,
+      );
+
+      if (!debit.changes) {
+        await db.exec('ROLLBACK');
+        const row = await db.get('SELECT balance FROM users WHERE discord_id = ?', interaction.user.id);
+        const balance = row?.balance ?? startingBalance;
+        return interaction.reply({ content: `❌ You need **${item.price.toLocaleString()}** 🪙 but only have **${balance.toLocaleString()}**.`, flags: MessageFlags.Ephemeral });
+      }
+
       await db.run(`INSERT INTO inventory (guild_id, user_id, item_id, quantity) VALUES (?, ?, ?, 1)
         ON CONFLICT(guild_id, user_id, item_id) DO UPDATE SET quantity = quantity + 1, updated_at = CURRENT_TIMESTAMP`, interaction.guild.id, interaction.user.id, itemId);
       await db.exec('COMMIT');
@@ -67,6 +82,7 @@ module.exports = {
       throw error;
     }
 
-    return interaction.reply({ content: `✅ Bought **${item.name}** for **${item.price.toLocaleString()}** 🪙. New balance: **${newBalance.toLocaleString()}** 🪙.` });
+    const finalRow = await db.get('SELECT balance FROM users WHERE discord_id = ?', interaction.user.id);
+    return interaction.reply({ content: `✅ Bought **${item.name}** for **${item.price.toLocaleString()}** 🪙. New balance: **${finalRow.balance.toLocaleString()}** 🪙.` });
   },
 };

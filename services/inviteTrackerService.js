@@ -1,8 +1,20 @@
 'use strict';
 
 const inviteCache = new Map();
+const guildLocks = new Map();
 const DEFAULT_MIN_ACCOUNT_AGE_DAYS = 7;
 const DEFAULT_MIN_STAY_MINUTES = 60;
+
+// Serializes invite-diffing per guild. Two members joining close together
+// (raids, invite-event spam) would otherwise both read+diff the same cached
+// invite-use snapshot before either writes it back, letting joins get
+// mis-attributed or dropped entirely.
+function withGuildLock(guildId, task) {
+  const previous = guildLocks.get(guildId) || Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  guildLocks.set(guildId, run.catch(() => {}));
+  return run;
+}
 
 async function ensureSchema(database) {
   const db = await database;
@@ -99,31 +111,33 @@ function classifyMember(member) {
 
 async function handleMemberAdd(member, database) {
   await ensureSchema(database);
-  const db = await database;
-  const used = await findUsedInvite(member.guild);
-  const inviterId = used?.inviter?.id || null;
-  const { classification, ageDays } = classifyMember(member);
-  const event = await activeEvent(db, member.guild.id);
+  return withGuildLock(member.guild.id, async () => {
+    const db = await database;
+    const used = await findUsedInvite(member.guild);
+    const inviterId = used?.inviter?.id || null;
+    const { classification, ageDays } = classifyMember(member);
+    const event = await activeEvent(db, member.guild.id);
 
-  await db.run(
-    `INSERT INTO invite_joins (guild_id, joiner_id, inviter_id, invite_code, classification, account_age_days, event_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(guild_id, joiner_id) DO UPDATE SET
-       inviter_id = excluded.inviter_id,
-       invite_code = excluded.invite_code,
-       classification = excluded.classification,
-       account_age_days = excluded.account_age_days,
-       event_id = excluded.event_id,
-       joined_at = CURRENT_TIMESTAMP,
-       left_at = NULL`,
-    member.guild.id,
-    member.id,
-    inviterId,
-    used?.code || null,
-    classification,
-    ageDays,
-    event?.id || null,
-  );
+    await db.run(
+      `INSERT INTO invite_joins (guild_id, joiner_id, inviter_id, invite_code, classification, account_age_days, event_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(guild_id, joiner_id) DO UPDATE SET
+         inviter_id = excluded.inviter_id,
+         invite_code = excluded.invite_code,
+         classification = excluded.classification,
+         account_age_days = excluded.account_age_days,
+         event_id = excluded.event_id,
+         joined_at = CURRENT_TIMESTAMP,
+         left_at = NULL`,
+      member.guild.id,
+      member.id,
+      inviterId,
+      used?.code || null,
+      classification,
+      ageDays,
+      event?.id || null,
+    );
+  });
 }
 
 async function handleMemberRemove(member, database) {
