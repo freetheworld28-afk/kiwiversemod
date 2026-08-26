@@ -13,7 +13,7 @@ module.exports = {
 
       if (!(await isEventLoggingEnabled(database, guild.id, 'logging.messageDelete'))) return;
 
-      const logsChannel = await getLogChannel(guild, database);
+      const logsChannel = await getLogChannel(guild, database, 'message');
       if (!logsChannel) return;
 
       const embed = new EmbedBuilder()
