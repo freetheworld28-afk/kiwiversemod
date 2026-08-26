@@ -2,6 +2,7 @@ const { Events, REST, Routes, ActivityType } = require('discord.js');
 const { initDashboardSchema } = require('../api/init.js');
 const { startApiServer } = require('../api/server.js');
 const inviteTracker = require('../services/inviteTrackerService');
+const reminderService = require('../services/reminderService');
 
 module.exports = {
   name: Events.ClientReady,
@@ -17,6 +18,11 @@ module.exports = {
     // Initialize dashboard configuration storage and API.
     await initDashboardSchema(database);
     startApiServer(client, database);
+
+    // Restore persistent reminders after restarts/deploys.
+    await reminderService.initialize(client, database).catch((error) => {
+      console.error('Reminder scheduler init failed:', error);
+    });
 
     // Snapshot current invite use counts so new joins can be attributed.
     for (const guild of client.guilds.cache.values()) {
