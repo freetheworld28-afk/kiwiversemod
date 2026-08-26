@@ -56,22 +56,32 @@ async function candidatesFromTrackedInvites(database, guildId, codes) {
   );
 }
 
-async function candidatesFromWindow(guild, startMs, endMs, onlyEveryone) {
-  await guild.members.fetch();
-  return guild.members.cache
-    .filter((member) => {
-      if (member.user.bot) return false;
-      if (!member.joinedTimestamp) return false;
-      if (member.joinedTimestamp < startMs || member.joinedTimestamp > endMs) return false;
-      if (onlyEveryone && member.roles.cache.size !== 1) return false;
-      return true;
-    })
-    .map((member) => ({
+async function fetchAllMembers(guild) {
+  try {
+    await guild.members.fetch();
+    return { ok: true };
+  } catch (error) {
+    console.error('[RaidCleanup] Failed to fetch guild members:', error);
+    return { ok: false, error };
+  }
+}
+
+function candidatesFromWindow(guild, startMs, endMs, onlyEveryone) {
+  const rows = [];
+  for (const member of guild.members.cache.values()) {
+    if (member.user.bot) continue;
+    if (!member.joinedTimestamp) continue;
+    if (member.joinedTimestamp < startMs || member.joinedTimestamp > endMs) continue;
+    if (onlyEveryone && member.roles.cache.size !== 1) continue;
+
+    rows.push({
       userId: member.id,
       joinedAt: new Date(member.joinedTimestamp).toISOString(),
       inviteCode: null,
       roleCount: member.roles.cache.size,
-    }));
+    });
+  }
+  return rows;
 }
 
 async function buildCandidateSet(interaction, database) {
@@ -88,6 +98,16 @@ async function buildCandidateSet(interaction, database) {
   let candidates = await candidatesFromTrackedInvites(database, interaction.guild.id, codes);
   let mode = codes.size && candidates.length ? (anyBot ? 'all_bot_invites' : 'tracked_invites') : 'time_window';
 
+  // Fetch the complete member list ONCE. Historical cleanup can involve hundreds
+  // of accounts; fetching each member individually is slow and can fail/rate-limit.
+  const fetched = await fetchAllMembers(interaction.guild);
+  if (!fetched.ok) {
+    return {
+      error: 'KiwiVerse could not fetch the server member list. Make sure the Server Members Intent is enabled for the bot and that it has permission to view/kick members.',
+      codes: Array.from(codes),
+    };
+  }
+
   if (!candidates.length) {
     const startMs = parseTimestamp(start);
     const endMs = parseTimestamp(end);
@@ -100,13 +120,13 @@ async function buildCandidateSet(interaction, database) {
         codes: Array.from(codes),
       };
     }
-    candidates = await candidatesFromWindow(interaction.guild, startMs, endMs, onlyEveryone);
+    candidates = candidatesFromWindow(interaction.guild, startMs, endMs, onlyEveryone);
   }
 
   const unique = new Map();
   for (const row of candidates) {
     if (row.userId === interaction.guild.ownerId || row.userId === interaction.user.id) continue;
-    const member = await interaction.guild.members.fetch(row.userId).catch(() => null);
+    const member = interaction.guild.members.cache.get(row.userId);
     if (!member || !member.kickable) continue;
     unique.set(row.userId, { ...row, member });
   }
@@ -158,7 +178,17 @@ module.exports = {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const result = await buildCandidateSet(interaction, database);
+
+    let result;
+    try {
+      result = await buildCandidateSet(interaction, database);
+    } catch (error) {
+      console.error('[RaidCleanup] Preview/build failed:', error);
+      return interaction.editReply({
+        content: `⚠️ Raid scan failed: \`${String(error?.message || error).slice(0, 500)}\`\nCheck Railway logs for the full error.`,
+      });
+    }
+
     if (result.error) {
       const codeNote = result.codes?.length ? `\n🤖 Bot-created invite codes still visible: **${result.codes.length}**` : '';
       return interaction.editReply({ content: `⚠️ ${result.error}${codeNote}` });
