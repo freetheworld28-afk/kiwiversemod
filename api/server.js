@@ -4,6 +4,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
 const { PermissionFlagsBits } = require('discord.js');
+const levelingService = require('../services/levelingService');
 
 let server = null;
 const startedAt = Date.now();
@@ -172,6 +173,12 @@ async function patchConfig(db, guildId, updates) {
     await db.exec('ROLLBACK');
     throw error;
   }
+
+  // Dashboard writes go straight to guild_settings, bypassing any in-memory
+  // settings cache - drop the leveling cache for this guild so the next
+  // message picks up the new config instead of waiting out its TTL.
+  levelingService.invalidateGuildSettings(guildId);
+
   return getConfig(db, guildId);
 }
 

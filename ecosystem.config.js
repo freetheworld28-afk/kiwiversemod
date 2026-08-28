@@ -10,6 +10,9 @@ module.exports = {
       max_restarts: 20,
       restart_delay: 5000,
       max_memory_restart: '500M',
+      // Give the leveling XP shutdown flush (SIGTERM handler) time to finish
+      // its batch write before PM2 escalates to SIGKILL.
+      kill_timeout: 5000,
     },
   ],
 };
