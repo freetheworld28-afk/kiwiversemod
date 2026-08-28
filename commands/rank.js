@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const levelingService = require('../services/levelingService');
 
 function xpForLevel(level) {
   return Math.pow(level * 10, 2);
@@ -14,11 +15,13 @@ module.exports = {
 
   async execute(interaction, client, database) {
     const target = interaction.options.getUser('user') || interaction.user;
-    const db = await database;
-    const row = await db.get('SELECT xp, level FROM users WHERE discord_id = ?', target.id);
 
-    const xp = row?.xp || 0;
-    const level = row?.level || 0;
+    // Cache first, SQLite fallback for anyone not currently active - never
+    // writes, so /rank can't itself dirty the leveling cache.
+    const record = await levelingService.getCurrentUser(database, interaction.guild.id, target.id, target.username);
+    const xp = record.xp;
+    const level = record.level;
+
     const currentFloor = xpForLevel(level);
     const nextFloor = xpForLevel(level + 1);
     const progress = Math.max(0, xp - currentFloor);
@@ -27,16 +30,13 @@ module.exports = {
     const filled = Math.round(percent / 10);
     const bar = `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
 
-    const positionRow = await db.get(
-      'SELECT COUNT(*) + 1 AS rank FROM users WHERE xp > ?',
-      xp,
-    );
+    const rank = await levelingService.getEffectiveRank(database, target.id, xp);
 
     const embed = new EmbedBuilder()
       .setColor(0x8b5cf6)
       .setAuthor({ name: `${target.username}'s Rank`, iconURL: target.displayAvatarURL({ size: 128 }) })
       .addFields(
-        { name: '🏆 Rank', value: `#${positionRow?.rank || 1}`, inline: true },
+        { name: '🏆 Rank', value: `#${rank}`, inline: true },
         { name: '⭐ Level', value: String(level), inline: true },
         { name: '✨ Total XP', value: xp.toLocaleString(), inline: true },
         { name: 'Progress', value: `\`${bar}\` ${percent}%\n${progress.toLocaleString()} / ${needed.toLocaleString()} XP to next level` },

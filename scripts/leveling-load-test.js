@@ -143,6 +143,55 @@ async function main() {
   if (!busyRow) throw new Error('FAIL: busy-test-user was not persisted after retry');
   console.log(`  busy-test-user persisted after retry: xp=${busyRow.xp}`);
 
+  console.log('\n--- Test 7: /rank-style read shows fresh XP immediately, with zero extra SQLite I/O ---');
+  const rankUserId = 'rank-test-user';
+  await levelingService.handleMessage(fakeMessage(rankUserId, 'RankUser'), null, database);
+  const readsBefore7 = reads;
+  const writesBefore7 = writes;
+  const rankRecord = await levelingService.getCurrentUser(database, GUILD_ID, rankUserId, 'RankUser');
+  const rankPosition = await levelingService.getEffectiveRank(database, rankUserId, rankRecord.xp);
+  console.log(`  Immediately after one message: cached xp=${rankRecord.xp}, rank=#${rankPosition}`);
+  console.log(`  SQLite reads caused by the read command: ${reads - readsBefore7} (expected 1 - the user's own xp/level is already cached with zero reads; the 1 read is getEffectiveRank's COUNT-of-others query, which is expected)`);
+  console.log(`  SQLite writes caused by the read command: ${writes - writesBefore7} (expected 0)`);
+  if (rankRecord.xp < 15 || rankRecord.xp > 25) throw new Error('FAIL: /rank-style read did not show the XP just awarded');
+  if (writes - writesBefore7 !== 0) throw new Error('FAIL: a cache-aware read command wrote to SQLite');
+
+  console.log('\n--- Test 8: /profile-style read shows the same fresh XP, still zero writes ---');
+  const writesBefore8 = writes;
+  const profileRecord = await levelingService.getCurrentUser(database, GUILD_ID, rankUserId, 'RankUser');
+  console.log(`  /profile-style xp read: ${profileRecord.xp} (should match Test 7's ${rankRecord.xp})`);
+  if (profileRecord.xp !== rankRecord.xp) throw new Error('FAIL: /profile-style read disagreed with /rank-style read for the same user');
+  if (writes - writesBefore8 !== 0) throw new Error('FAIL: /profile-style read wrote to SQLite');
+
+  console.log('\n--- Test 9: leaderboard surfaces a cached user whose stale DB row would otherwise miss a small pool ---');
+  // 15 DB-only users with a moderate XP range populate a small candidate pool.
+  for (let i = 0; i < 15; i++) {
+    await db.run(`INSERT INTO users (discord_id, username, xp, level) VALUES (?, ?, ?, ?)`, `pool-${i}`, `Pool${i}`, 50 + i, 1);
+  }
+  // stale-user's SQLite row is low (would never make a small top-10 pool),
+  // but their in-memory cache has since accumulated much higher XP -
+  // simulating XP earned since their last periodic flush.
+  await db.run(`INSERT INTO users (discord_id, username, xp, level) VALUES ('stale-user', 'StaleUser', 5, 0)`);
+  const staleRecord = await levelingService.getCurrentUser(database, GUILD_ID, 'stale-user', 'StaleUser');
+  staleRecord.xp = 999;
+  staleRecord.level = 3;
+
+  const smallPoolLeaderboard = await levelingService.getLeaderboard(database, 10, 10); // pool deliberately smaller than total DB rows
+  const staleInTop = smallPoolLeaderboard.find((r) => r.discordId === 'stale-user');
+  console.log(`  stale-user: db xp=5, cached xp=999 - present in top 10: ${Boolean(staleInTop)}, ranked #1: ${smallPoolLeaderboard[0]?.discordId === 'stale-user'}`);
+  if (!staleInTop) throw new Error('FAIL: cached user with fresh high XP was missing from the leaderboard despite a stale low DB row');
+  if (smallPoolLeaderboard[0].discordId !== 'stale-user') throw new Error('FAIL: cached user with the highest effective XP should rank #1');
+
+  console.log('\n--- Test 10: user not cached in this process falls back to SQLite (simulates post-restart read) ---');
+  await db.run(`INSERT INTO users (discord_id, username, xp, level) VALUES ('never-cached-user', 'NeverCached', 777, 2)`);
+  const readsBefore10 = reads;
+  const writesBefore10 = writes;
+  const neverCachedRecord = await levelingService.getCurrentUser(database, GUILD_ID, 'never-cached-user', 'NeverCached');
+  console.log(`  never-cached-user resolved via SQLite fallback: xp=${neverCachedRecord.xp} (expected 777)`);
+  console.log(`  SQLite reads: ${reads - readsBefore10} (expected 1), writes: ${writes - writesBefore10} (expected 0)`);
+  if (neverCachedRecord.xp !== 777) throw new Error('FAIL: SQLite fallback for an uncached user returned the wrong XP');
+  if (writes - writesBefore10 !== 0) throw new Error('FAIL: SQLite fallback read caused a write');
+
   console.log('\n--- Metrics snapshot ---');
   console.log(levelingService.getMetrics());
 

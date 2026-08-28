@@ -108,6 +108,82 @@ async function getUserRecord(database, guildId, discordId, username) {
   return userCache.get(discordId);
 }
 
+// Cache-aware read path for /rank, /profile, and the leaderboard. Never
+// writes to SQLite - this is the exact same lazy-load used by handleMessage
+// (same cache, same loadingPromises race guard), so a read command for a
+// user who isn't cached yet triggers at most one SELECT and populates the
+// cache for next time, without creating a second independent cache.
+async function getCurrentUser(database, guildId, discordId, usernameFallback) {
+  return getUserRecord(database, guildId, discordId, usernameFallback);
+}
+
+// 1-indexed rank by XP. Counts SQLite rows above `effectiveXp` for users
+// who are NOT currently cached (their DB row is the source of truth), then
+// adds in currently-cached users compared against their live in-memory XP -
+// so a user who just gained XP in memory is ranked correctly even though
+// their SQLite row hasn't been flushed yet.
+async function getEffectiveRank(database, discordId, effectiveXp) {
+  const db = await database;
+  const cachedIds = Array.from(userCache.keys());
+
+  let dbHigherCount;
+  if (cachedIds.length === 0) {
+    const row = await db.get('SELECT COUNT(*) AS count FROM users WHERE xp > ?', effectiveXp);
+    dbHigherCount = row.count;
+  } else {
+    const placeholders = cachedIds.map(() => '?').join(',');
+    const row = await db.get(
+      `SELECT COUNT(*) AS count FROM users WHERE xp > ? AND discord_id NOT IN (${placeholders})`,
+      effectiveXp,
+      ...cachedIds,
+    );
+    dbHigherCount = row.count;
+  }
+
+  let cacheHigherCount = 0;
+  for (const [otherId, record] of userCache.entries()) {
+    if (otherId === discordId) continue;
+    if (record.xp > effectiveXp) cacheHigherCount++;
+  }
+
+  return dbHigherCount + cacheHigherCount + 1;
+}
+
+// Cache-aware leaderboard: takes a generous candidate pool from SQLite (the
+// persistent source of truth for users not currently active), then overlays
+// every currently-cached user's live XP/level on top - this both refreshes
+// stale duplicates and adds cached users who wouldn't have made the DB-side
+// pool at all, so recently-earned XP is never missing from the top ranks.
+async function getLeaderboard(database, limit = 10, poolSize = 100) {
+  const db = await database;
+  const dbRows = await db.all(
+    'SELECT discord_id, username, xp, level FROM users ORDER BY xp DESC LIMIT ?',
+    poolSize,
+  );
+
+  const merged = new Map();
+  for (const row of dbRows) {
+    merged.set(row.discord_id, {
+      discordId: row.discord_id,
+      username: row.username,
+      xp: row.xp || 0,
+      level: row.level || 0,
+    });
+  }
+  for (const [discordId, record] of userCache.entries()) {
+    merged.set(discordId, {
+      discordId,
+      username: record.username,
+      xp: record.xp,
+      level: record.level,
+    });
+  }
+
+  return Array.from(merged.values())
+    .sort((a, b) => b.xp - a.xp)
+    .slice(0, limit);
+}
+
 async function announceLevelUp(message, settings, record) {
   await message.react('🎉').catch(() => null);
 
@@ -277,4 +353,7 @@ module.exports = {
   shutdown,
   invalidateGuildSettings,
   getMetrics,
+  getCurrentUser,
+  getEffectiveRank,
+  getLeaderboard,
 };
