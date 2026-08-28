@@ -4,6 +4,7 @@ const { startApiServer } = require('../api/server.js');
 const inviteTracker = require('../services/inviteTrackerService');
 const reminderService = require('../services/reminderService');
 const giveawayService = require('../services/giveawayService');
+const levelingService = require('../services/levelingService');
 
 module.exports = {
   name: Events.ClientReady,
@@ -30,6 +31,9 @@ module.exports = {
     await giveawayService.initialize(client, database).catch((error) => {
       console.error('Giveaway scheduler init failed:', error);
     });
+
+    // Start batching leveling XP writes instead of hitting SQLite per message.
+    levelingService.startAutoFlush(database);
 
     // Snapshot current invite use counts so new joins can be attributed.
     for (const guild of client.guilds.cache.values()) {

@@ -273,5 +273,29 @@ async function initDatabase() {
 // Connect to Discord
 client.login(DISCORD_TOKEN);
 
+// Flush pending in-memory leveling XP before the process actually exits, so
+// a restart/redeploy (SIGTERM from PM2/Railway/Docker) or a manual Ctrl-C
+// never loses XP that hasn't hit its periodic flush yet.
+const levelingService = require('./services/levelingService');
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n${signal} received - flushing pending leveling XP before exit...`);
+  const timeout = new Promise((resolve) => setTimeout(resolve, 4000));
+  try {
+    await Promise.race([levelingService.shutdown(database), timeout]);
+  } catch (error) {
+    console.error('Error during leveling shutdown flush:', error);
+  }
+  process.exit(0);
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('beforeExit', () => {
+  if (shuttingDown) return;
+  levelingService.flush(database).catch((error) => console.error('beforeExit leveling flush failed:', error));
+});
+
 // Export for use in events and commands
 module.exports = { client, database, cache, initDatabase, DB_FILE, persistentStorage };

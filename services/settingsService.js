@@ -54,6 +54,8 @@ const DEFAULT_SETTINGS = {
   'leveling.cooldownSeconds': 60,
   'leveling.levelUpChannelId': null,
   'leveling.dmLevelUp': false,
+  'leveling.ignoredChannelIds': [],
+  'leveling.ignoredRoleIds': [],
 
   'economy.enabled': true,
   'economy.currencyName': 'Kiwi Coins',
