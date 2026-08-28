@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
 const { logEvent } = require('../services/loggingService');
+const { getSettingsByPrefix } = require('../services/settingsService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,6 +15,11 @@ module.exports = {
   async execute(interaction, client, database) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
       return interaction.reply({ content: '⛔ You need Moderate Members to warn users.', flags: MessageFlags.Ephemeral });
+    }
+
+    const modSettings = await getSettingsByPrefix(database, interaction.guild.id, 'moderation');
+    if (modSettings.enabled === false) {
+      return interaction.reply({ content: '⛔ Moderation commands are currently disabled for this server (dashboard setting).', flags: MessageFlags.Ephemeral });
     }
 
     const target = interaction.options.getUser('user');
@@ -50,15 +56,17 @@ module.exports = {
       const row = await db.get('SELECT warnings FROM users WHERE discord_id = ?', target.id);
       const totalWarnings = row?.warnings || 1;
 
-      const dm = await notifyUser(target, {
-        title: `⚠️ Warning in ${interaction.guild.name}`,
-        description: 'A moderator issued you a warning.',
-        color: 0xfee75c,
-        fields: [
-          { name: 'Reason', value: reason },
-          { name: 'Total warnings', value: String(totalWarnings), inline: true },
-        ],
-      });
+      const dm = modSettings.dmAffectedUsers === false
+        ? { delivered: false, error: 'DM disabled by dashboard setting' }
+        : await notifyUser(target, {
+          title: `⚠️ Warning in ${interaction.guild.name}`,
+          description: 'A moderator issued you a warning.',
+          color: 0xfee75c,
+          fields: [
+            { name: 'Reason', value: reason },
+            { name: 'Total warnings', value: String(totalWarnings), inline: true },
+          ],
+        });
 
       await logEvent(interaction.guild, database, 'memberWarn', {
         target,

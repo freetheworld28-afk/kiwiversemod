@@ -76,6 +76,16 @@ function sweepSuppressed() {
 
 // ---- channel resolution ---------------------------------------------------
 
+// A forum channel isn't directly sendable (posting means creating a new
+// forum thread, a different flow this service doesn't implement), so
+// isTextBased() correctly excludes it here - it just falls through to the
+// next fallback like any other unusable configured channel. A thread IS
+// text-based and usable; its permission requirements differ (see
+// checkChannelAccess), not its eligibility as a log target.
+function isUsableLogChannel(channel) {
+  return Boolean(channel) && typeof channel.isTextBased === 'function' && channel.isTextBased();
+}
+
 // `category` picks a dedicated log channel (e.g. "message" -> a channel
 // literally named "message-logs", matching Dyno-style setups that split
 // logs by type) before falling back to the single generic logs channel.
@@ -84,11 +94,15 @@ async function getLogChannel(guild, database, category = null) {
     const categoryChannelId = await getSetting(database, guild.id, `logging.${category}ChannelId`, null);
     if (categoryChannelId) {
       const channel = guild.channels.cache.get(categoryChannelId);
-      if (channel && channel.isTextBased()) return channel;
+      if (isUsableLogChannel(channel)) return channel;
+      warnOnce(
+        `configured-channel-missing:${guild.id}:${category}`,
+        `[Logging] The configured ${category} log channel (ID ${categoryChannelId}) for guild ${guild.id} no longer exists or isn't a sendable text channel - falling back to other configured/named channels. Update logging.${category}ChannelId in the dashboard.`,
+      );
     }
 
     const byName = guild.channels.cache.find(
-      (ch) => ch.name === `${category}-logs` && ch.isTextBased(),
+      (ch) => ch.name === `${category}-logs` && isUsableLogChannel(ch),
     );
     if (byName) return byName;
   }
@@ -96,12 +110,16 @@ async function getLogChannel(guild, database, category = null) {
   const channelId = await getSetting(database, guild.id, 'logging.channelId', null);
   if (channelId) {
     const channel = guild.channels.cache.get(channelId);
-    if (channel && channel.isTextBased()) return channel;
+    if (isUsableLogChannel(channel)) return channel;
+    warnOnce(
+      `configured-channel-missing:${guild.id}:generic`,
+      `[Logging] The configured generic log channel (ID ${channelId}) for guild ${guild.id} no longer exists or isn't a sendable text channel - falling back to named channels. Update logging.channelId in the dashboard.`,
+    );
   }
 
   return (
-    guild.channels.cache.find((ch) => ch.name === process.env.LOGS_CHANNEL_NAME && ch.isTextBased())
-    || guild.channels.cache.find((ch) => ch.name === 'default-logs' && ch.isTextBased())
+    guild.channels.cache.find((ch) => ch.name === process.env.LOGS_CHANNEL_NAME && isUsableLogChannel(ch))
+    || guild.channels.cache.find((ch) => ch.name === 'default-logs' && isUsableLogChannel(ch))
     || null
   );
 }
@@ -118,9 +136,15 @@ function checkChannelAccess(channel, guild) {
   const perms = channel.permissionsFor(me);
   if (!perms) return { ok: false, missing: ['unable to resolve permissions'] };
 
+  // Threads require Send Messages in Threads, not the regular Send Messages
+  // permission a normal text channel needs.
+  const isThread = typeof channel.isThread === 'function' && channel.isThread();
+  const sendPermission = isThread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
+  const sendPermissionLabel = isThread ? 'Send Messages in Threads' : 'Send Messages';
+
   const missing = [];
   if (!perms.has(PermissionFlagsBits.ViewChannel)) missing.push('View Channel');
-  if (!perms.has(PermissionFlagsBits.SendMessages)) missing.push('Send Messages');
+  if (!perms.has(sendPermission)) missing.push(sendPermissionLabel);
   if (!perms.has(PermissionFlagsBits.EmbedLinks)) missing.push('Embed Links');
   return { ok: missing.length === 0, missing };
 }

@@ -6,6 +6,7 @@ const { URL } = require('url');
 const { PermissionFlagsBits } = require('discord.js');
 const levelingService = require('../services/levelingService');
 const { logEvent } = require('../services/loggingService');
+const { invalidateSettingsCache } = require('../services/settingsService');
 
 const MAX_CONFIG_VALUE_JSON_LENGTH = 20_000; // generous cap for a single settings value (arrays of IDs, etc.)
 
@@ -42,10 +43,17 @@ function redirect(res, location) {
   res.end();
 }
 
+// Fails closed: with no DASHBOARD_ORIGIN configured, every cross-origin
+// browser request is denied rather than falling back to a wildcard. This
+// only affects browser-enforced CORS - the DASHBOARD_API_KEY server-to-
+// server auth path is unaffected either way, since a non-browser caller
+// never applies these headers to begin with. index.js's startup validation
+// warns loudly when DASHBOARD_ORIGIN is unset, since it means the real
+// dashboard (a browser client) cannot reach this API at all until it's set.
 function getAllowedOrigin(req) {
-  const configured = process.env.DASHBOARD_ORIGIN || '*';
+  const configured = process.env.DASHBOARD_ORIGIN;
+  if (!configured) return 'null';
   const requestOrigin = req.headers.origin;
-  if (configured === '*') return '*';
   return requestOrigin === configured ? configured : 'null';
 }
 
@@ -203,9 +211,12 @@ async function patchConfig(db, guildId, updates) {
   }
 
   // Dashboard writes go straight to guild_settings, bypassing any in-memory
-  // settings cache - drop the leveling cache for this guild so the next
-  // message picks up the new config instead of waiting out its TTL.
+  // settings cache - drop every cached copy for this guild (leveling's own
+  // cache, and the shared prefix cache used by automod/welcome/tickets) so
+  // the next message/event picks up the new config instead of waiting out
+  // its TTL.
   levelingService.invalidateGuildSettings(guildId);
+  invalidateSettingsCache(guildId);
 
   const config = await getConfig(db, guildId);
   return { config, applied, skipped };

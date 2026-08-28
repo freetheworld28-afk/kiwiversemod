@@ -192,6 +192,75 @@ async function main() {
   if (neverCachedRecord.xp !== 777) throw new Error('FAIL: SQLite fallback for an uncached user returned the wrong XP');
   if (writes - writesBefore10 !== 0) throw new Error('FAIL: SQLite fallback read caused a write');
 
+  console.log('\n--- Test 12: realistic load - exactly 1,000 messages across exactly 100 users ---');
+  {
+    const USER_COUNT = 100;
+    const MESSAGES_PER_USER = 10; // 100 * 10 = 1000 messages total
+    const readsBefore12 = reads;
+    const writesBefore12 = writes;
+    const messagesBefore12 = levelingService.getMetrics().messagesProcessed;
+    const dirtyBefore12 = levelingService.getMetrics().dirtyCount; // may be non-zero from an earlier test's unflushed user
+
+    const tasks12 = [];
+    for (let u = 0; u < USER_COUNT; u++) {
+      const userId = `load12-user-${u}`;
+      for (let m = 0; m < MESSAGES_PER_USER; m++) {
+        tasks12.push(levelingService.handleMessage(fakeMessage(userId, `Load12User${u}`), null, database));
+      }
+    }
+    await Promise.all(tasks12);
+
+    const messagesProcessed12 = levelingService.getMetrics().messagesProcessed - messagesBefore12;
+    console.log(`  Fired ${tasks12.length} messages (expected 1000) across ${USER_COUNT} users`);
+    console.log(`  messagesProcessed delta: ${messagesProcessed12}`);
+    if (tasks12.length !== 1000) throw new Error('FAIL: test setup did not produce exactly 1000 messages');
+    if (messagesProcessed12 !== 1000) throw new Error('FAIL: levelingService did not report processing all 1000 messages');
+
+    console.log(`  SQLite reads during the run: ${reads - readsBefore12} (expected <= ${USER_COUNT}, one lazy-load per distinct user - no per-message query)`);
+    console.log(`  SQLite writes during the run: ${writes - writesBefore12} (expected 0 - writes only happen on flush)`);
+    if (writes - writesBefore12 !== 0) throw new Error('FAIL: a write happened on the per-message path during the 1000-message run');
+    if (reads - readsBefore12 > USER_COUNT) throw new Error('FAIL: more reads than distinct users - a per-message query crept back in');
+
+    // Each user sent 10 messages inside the same instant, so the 60s
+    // cooldown should have allowed exactly one award per user.
+    const sampleUser = await levelingService.getCurrentUser(database, GUILD_ID, 'load12-user-0', 'Load12User0');
+    console.log(`  Sample user xp after 10 rapid-fire messages: ${sampleUser.xp} (should be a single award, 15-25 range - cooldown held)`);
+    if (sampleUser.xp < 15 || sampleUser.xp > 25) throw new Error('FAIL: cooldown did not hold under 10 rapid messages from one user - XP looks like multiple awards');
+
+    // /rank and /profile read path.
+    const rankRead = await levelingService.getCurrentUser(database, GUILD_ID, 'load12-user-5', 'Load12User5');
+    const profileRead = await levelingService.getCurrentUser(database, GUILD_ID, 'load12-user-5', 'Load12User5');
+    console.log(`  /rank-style and /profile-style reads agree: ${rankRead.xp === profileRead.xp} (xp=${rankRead.xp})`);
+    if (rankRead.xp !== profileRead.xp) throw new Error('FAIL: /rank and /profile disagree on the same user\'s cached XP');
+
+    // Dirty tracking + batch flush.
+    const metricsBeforeFlush = levelingService.getMetrics();
+    const dirtyFromThisRun = metricsBeforeFlush.dirtyCount - dirtyBefore12;
+    console.log(`  Dirty users pending flush: ${metricsBeforeFlush.dirtyCount} total, ${dirtyFromThisRun} attributable to this run (expected ${USER_COUNT})`);
+    if (dirtyFromThisRun !== USER_COUNT) throw new Error(`FAIL: expected ${USER_COUNT} dirty users from this run, got ${dirtyFromThisRun}`);
+
+    const writesBeforeFlush12 = writes;
+    const flushResult12 = await levelingService.flush(database);
+    console.log(`  Flush: ${flushResult12.flushed} users written in ${writes - writesBeforeFlush12} SQL statements inside one transaction`);
+    if (flushResult12.flushed < USER_COUNT) throw new Error('FAIL: flush did not persist all dirty users from the load run');
+
+    // Leaderboard accuracy: the sample user's cached xp must be reflected.
+    // limit/poolSize are deliberately huge (not just "big enough for this
+    // run") because this script shares one process/cache across all tests -
+    // earlier tests' users are still cached and competing for top ranks, so
+    // a modest limit could legitimately exclude this specific low-xp user
+    // without that being a product bug.
+    const leaderboard12 = await levelingService.getLeaderboard(database, 10_000, 10_000);
+    const leaderboardEntry = leaderboard12.find((row) => row.discordId === 'load12-user-0');
+    console.log(`  Leaderboard reflects sample user: xp=${leaderboardEntry?.xp} (should match cached ${sampleUser.xp})`);
+    if (!leaderboardEntry || leaderboardEntry.xp !== sampleUser.xp) throw new Error('FAIL: leaderboard is missing or inaccurate for a user from the load run');
+
+    // Cache growth is bounded by distinct real users, not message volume -
+    // 1000 messages from 100 users should leave at most ~100 cached users
+    // from this run (plus whatever earlier tests already cached).
+    console.log(`  Total cached users after the run: ${levelingService.getMetrics().cachedUsers}`);
+  }
+
   console.log('\n--- Metrics snapshot ---');
   console.log(levelingService.getMetrics());
 
