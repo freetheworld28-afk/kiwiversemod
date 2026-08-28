@@ -1,6 +1,7 @@
 'use strict';
 
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const levelingService = require('../services/levelingService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -8,15 +9,15 @@ module.exports = {
     .setDescription('Show the KiwiVerse XP leaderboard'),
 
   async execute(interaction, client, database) {
-    const db = await database;
-    const rows = await db.all(
-      'SELECT discord_id, username, xp, level FROM users ORDER BY xp DESC LIMIT 10',
-    );
+    // Cache-aware: overlays every currently-cached user's live XP on top of
+    // a SQLite candidate pool, so a member who just earned XP shows up
+    // correctly even before their row is flushed.
+    const rows = await levelingService.getLeaderboard(database, 10);
 
     const lines = rows.length
       ? rows.map((row, index) => {
           const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `**#${index + 1}**`;
-          return `${medal} <@${row.discord_id}> — Level **${row.level || 0}** • **${(row.xp || 0).toLocaleString()} XP**`;
+          return `${medal} <@${row.discordId}> — Level **${row.level || 0}** • **${(row.xp || 0).toLocaleString()} XP**`;
         }).join('\n')
       : 'No XP has been earned yet.';
 
