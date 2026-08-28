@@ -1,6 +1,7 @@
 'use strict';
 
 const { logEvent, markSuppressed } = require('../services/loggingService');
+const { getCachedSettingsByPrefix } = require('../services/settingsService');
 
 const SLUR_FILTER = [
   'nigger',
@@ -21,9 +22,9 @@ function normalizeText(text) {
   return text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
 
-function containsForbiddenContent(rawText) {
+function containsForbiddenContent(rawText, { blockInvites }) {
   const text = normalizeText(rawText);
-  if (INVITE_PATTERN.test(text)) return 'invite-link';
+  if (blockInvites && INVITE_PATTERN.test(text)) return 'invite-link';
 
   const stripped = Array.from(text)
     .map((ch) => LEET_MAP[ch] ?? ch)
@@ -40,7 +41,10 @@ function containsForbiddenContent(rawText) {
 module.exports = {
   name: 'contentFilter',
   async onMessage(message, client, database) {
-    const violation = containsForbiddenContent(message.content || '');
+    const settings = await getCachedSettingsByPrefix(database, message.guild.id, 'automod');
+    if (settings.enabled === false) return;
+
+    const violation = containsForbiddenContent(message.content || '', { blockInvites: settings.blockInvites !== false });
     if (!violation) return;
 
     // Mark this message ID before deleting it so the generic messageDelete

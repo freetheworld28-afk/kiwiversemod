@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
 const { logEvent, markSuppressed } = require('../services/loggingService');
+const { getSettingsByPrefix } = require('../services/settingsService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -39,6 +40,11 @@ module.exports = {
       });
     }
 
+    const modSettings = await getSettingsByPrefix(database, interaction.guild.id, 'moderation');
+    if (modSettings.enabled === false) {
+      return interaction.reply({ content: '⛔ Moderation commands are currently disabled for this server (dashboard setting).', flags: MessageFlags.Ephemeral });
+    }
+
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason provided';
     const purgeDays = interaction.options.getInteger('days') || 0;
@@ -46,13 +52,15 @@ module.exports = {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      const dm = await notifyUser(target, {
-        title: '🔨 You have been banned',
-        description: `You were banned from **${interaction.guild.name}**.`,
-        color: 0xed4245,
-        fields: [{ name: 'Reason', value: reason }],
-        footer: 'If you believe this was a mistake, use the server appeal process if available.',
-      });
+      const dm = modSettings.dmAffectedUsers === false
+        ? { delivered: false, error: 'DM disabled by dashboard setting' }
+        : await notifyUser(target, {
+          title: '🔨 You have been banned',
+          description: `You were banned from **${interaction.guild.name}**.`,
+          color: 0xed4245,
+          fields: [{ name: 'Reason', value: reason }],
+          footer: 'If you believe this was a mistake, use the server appeal process if available.',
+        });
 
       // A ban fires both GuildBanAdd and (if the target was still a member)
       // GuildMemberRemove - suppress both so the dedicated ban-log handler
@@ -74,8 +82,11 @@ module.exports = {
         extraFields: [{ name: 'Message Purge', value: `${purgeDays} day(s)`, inline: true }],
       });
 
+      const dmStatus = modSettings.dmAffectedUsers === false
+        ? 'DM notifications are disabled for this server (dashboard setting).'
+        : (dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.');
       return interaction.editReply({
-        content: `🔨 **${target.tag}** has been banned.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
+        content: `🔨 **${target.tag}** has been banned.\n${dmStatus}`,
       });
     } catch (error) {
       console.error('Ban error:', error);

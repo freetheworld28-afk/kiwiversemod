@@ -31,7 +31,7 @@ function validateEnvironment() {
     warnings.push('Neither DASHBOARD_API_KEY nor DISCORD_CLIENT_SECRET (for Discord OAuth login) is set - the Dashboard API will have no way to authenticate any request.');
   }
   if (!process.env.DASHBOARD_ORIGIN) {
-    warnings.push('DASHBOARD_ORIGIN is not set - the Dashboard API currently allows cross-origin requests from any site for authenticated routes. Set DASHBOARD_ORIGIN to your dashboard\'s URL to lock this down.');
+    warnings.push('DASHBOARD_ORIGIN is not set - the Dashboard API now fails closed on CORS, so the dashboard (a browser client) will NOT be able to reach this API at all until DASHBOARD_ORIGIN is set to its exact URL (see .env.example).');
   }
 
   if (missing.length) {

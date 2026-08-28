@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
 const { logEvent, markSuppressed } = require('../services/loggingService');
+const { getSettingsByPrefix } = require('../services/settingsService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -32,6 +33,11 @@ module.exports = {
       return interaction.reply({ content: '⛔ You need Moderator or higher to use this command.', flags: MessageFlags.Ephemeral });
     }
 
+    const modSettings = await getSettingsByPrefix(database, interaction.guild.id, 'moderation');
+    if (modSettings.enabled === false) {
+      return interaction.reply({ content: '⛔ Moderation commands are currently disabled for this server (dashboard setting).', flags: MessageFlags.Ephemeral });
+    }
+
     const target = interaction.options.getUser('user');
     const reason = interaction.options.getString('reason') || 'No reason provided';
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -40,13 +46,15 @@ module.exports = {
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
       if (!member) return interaction.editReply({ content: '❌ Could not find that member in the server.' });
 
-      const dm = await notifyUser(target, {
-        title: '👢 You have been kicked',
-        description: `You were kicked from **${interaction.guild.name}**.`,
-        color: 0xe67e22,
-        fields: [{ name: 'Reason', value: reason }],
-        footer: 'You may rejoin unless server staff have restricted access.',
-      });
+      const dm = modSettings.dmAffectedUsers === false
+        ? { delivered: false, error: 'DM disabled by dashboard setting' }
+        : await notifyUser(target, {
+          title: '👢 You have been kicked',
+          description: `You were kicked from **${interaction.guild.name}**.`,
+          color: 0xe67e22,
+          fields: [{ name: 'Reason', value: reason }],
+          footer: 'You may rejoin unless server staff have restricted access.',
+        });
 
       // Kicking fires GuildMemberRemove - suppress the generic "member left"
       // log for this departure so this richer kick-specific entry is the
@@ -56,8 +64,11 @@ module.exports = {
       await member.kick(`${interaction.user.tag} | ${reason}`);
       await logEvent(interaction.guild, database, 'memberKick', { target, moderator: interaction.user, reason, dmDelivered: dm.delivered });
 
+      const dmStatus = modSettings.dmAffectedUsers === false
+        ? 'DM notifications are disabled for this server (dashboard setting).'
+        : (dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.');
       return interaction.editReply({
-        content: `👢 **${target.tag}** has been kicked.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
+        content: `👢 **${target.tag}** has been kicked.\n${dmStatus}`,
       });
     } catch (error) {
       console.error('Kick error:', error);

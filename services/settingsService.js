@@ -15,8 +15,14 @@ const DEFAULT_SETTINGS = {
   'moderation.dmAffectedUsers': true,
   'moderation.logChannelId': null,
 
-  'automod.enabled': false,
-  'automod.blockInvites': false,
+  // enabled/blockInvites default true because the slur+invite filter they
+  // gate has always run unconditionally in features/contentFilter.js - a
+  // default-off toggle would silently disable already-relied-upon
+  // protection the moment these settings started being read. blockLinks/
+  // spamProtection/massMentionProtection/capsProtection have no
+  // implementation in the bot yet, so their default is moot either way.
+  'automod.enabled': true,
+  'automod.blockInvites': true,
   'automod.blockLinks': false,
   'automod.spamProtection': false,
   'automod.massMentionProtection': false,
@@ -35,7 +41,11 @@ const DEFAULT_SETTINGS = {
   'logging.configChanges': true,
   'logging.robloxVerification': true,
 
-  'welcome.enabled': false,
+  // enabled defaults true because a welcome message has always sent
+  // unconditionally in guildMemberAdd.js - see the automod.enabled comment
+  // above for the same reasoning (don't silently disable existing behavior
+  // the moment this setting starts being read).
+  'welcome.enabled': true,
   'welcome.channelId': null,
   'welcome.leaveChannelId': null,
   'welcome.message': 'Welcome {user} to {server}!',
@@ -158,9 +168,40 @@ async function getSettingsByPrefix(database, guildId, prefix) {
   return result;
 }
 
+// Small TTL cache for getSettingsByPrefix(), shared by any feature that
+// needs to check its guild settings on a high-frequency path (e.g. once per
+// message) without turning that into a SQLite query per message. Not used
+// by every caller - one-off reads (a slash command, a button handler) go
+// straight to getSettingsByPrefix()/getSetting() since they're already
+// infrequent relative to a message stream.
+const prefixCache = new Map(); // `${guildId}:${prefix}` -> { value, expiresAt }
+const PREFIX_CACHE_TTL_MS = 60_000;
+
+async function getCachedSettingsByPrefix(database, guildId, prefix) {
+  const key = `${guildId}:${prefix}`;
+  const cached = prefixCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const value = await getSettingsByPrefix(database, guildId, prefix);
+  prefixCache.set(key, { value, expiresAt: Date.now() + PREFIX_CACHE_TTL_MS });
+  return value;
+}
+
+// Called after a dashboard write so the next message picks up the change
+// instead of waiting out the TTL. A PATCH can touch arbitrary keys across
+// prefixes, so this drops every cached prefix for the guild rather than
+// trying to figure out which ones were affected.
+function invalidateSettingsCache(guildId) {
+  for (const key of prefixCache.keys()) {
+    if (key.startsWith(`${guildId}:`)) prefixCache.delete(key);
+  }
+}
+
 module.exports = {
   DEFAULT_SETTINGS,
   ensureGuildDefaults,
+  getCachedSettingsByPrefix,
+  invalidateSettingsCache,
   getSetting,
   setSetting,
   getSettingsByPrefix,

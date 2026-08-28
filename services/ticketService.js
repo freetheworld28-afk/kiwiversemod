@@ -14,7 +14,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { notifyUser } = require('./notificationService');
-const { getSetting } = require('./settingsService');
+const { getCachedSettingsByPrefix } = require('./settingsService');
 const { logEvent } = require('./loggingService');
 
 const CATEGORY_OPTIONS = [
@@ -27,20 +27,21 @@ const CATEGORY_OPTIONS = [
   ['other', 'Other', 'Anything that does not fit another category', '❓'],
 ];
 
-function staffRoleIds() {
+function staffRoleIds(extraRoleId = null) {
   return [
     process.env.TRIAL_MOD_ROLE_ID,
     process.env.MOD_ROLE_ID,
     process.env.SR_MOD_ROLE_ID,
     process.env.ADMIN_ROLE_ID,
     process.env.TICKET_STAFF_ROLE_ID,
+    extraRoleId,
   ].filter(Boolean);
 }
 
-function isStaff(member) {
+function isStaff(member, extraRoleId = null) {
   if (!member) return false;
   if (member.permissions?.has(PermissionFlagsBits.ManageChannels)) return true;
-  return staffRoleIds().some((id) => member.roles?.cache?.has(id));
+  return staffRoleIds(extraRoleId).some((id) => member.roles?.cache?.has(id));
 }
 
 async function ensureSchema(database) {
@@ -141,6 +142,11 @@ async function createTicket(interaction, database, category, reason) {
   await ensureSchema(database);
   const db = await database;
 
+  const ticketSettings = await getCachedSettingsByPrefix(database, interaction.guild.id, 'tickets');
+  if (ticketSettings.enabled === false) {
+    return interaction.reply({ content: '⛔ Tickets are currently disabled for this server (dashboard setting).', ephemeral: true });
+  }
+
   const existing = await db.get(
     "SELECT * FROM tickets WHERE guild_id = ? AND user_id = ? AND category = ? AND status = 'open'",
     interaction.guild.id,
@@ -155,14 +161,14 @@ async function createTicket(interaction, database, category, reason) {
     { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
     { id: interaction.client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
-    ...staffRoleIds().map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] })),
+    ...staffRoleIds(ticketSettings.staffRoleId).map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] })),
   ];
 
   const safeName = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 18) || 'member';
   const channel = await interaction.guild.channels.create({
     name: `ticket-${safeName}`,
     type: ChannelType.GuildText,
-    parent: process.env.TICKET_CATEGORY_ID || null,
+    parent: ticketSettings.categoryId || process.env.TICKET_CATEGORY_ID || null,
     topic: `Ticket opened by ${interaction.user.tag} (${interaction.user.id}) | ${category}`,
     permissionOverwrites: overwrites,
   });
@@ -190,16 +196,19 @@ async function createTicket(interaction, database, category, reason) {
     )
     .setTimestamp();
 
-  await channel.send({ content: `<@${interaction.user.id}> ${staffRoleIds().map((id) => `<@&${id}>`).join(' ')}`.trim(), embeds: [embed], components: ticketControls(false, false) });
+  await channel.send({ content: `<@${interaction.user.id}> ${staffRoleIds(ticketSettings.staffRoleId).map((id) => `<@&${id}>`).join(' ')}`.trim(), embeds: [embed], components: ticketControls(false, false) });
 
-  const dm = await notifyUser(interaction.user, {
-    title: '🎫 Your KiwiVerse ticket was created',
-    description: `Your **${categoryLabel}** ticket has been opened in **${interaction.guild.name}**.`,
-    color: 0x57f287,
-    fields: [{ name: 'Reason', value: reason }],
-  });
+  const dm = ticketSettings.dmOnOpen === false
+    ? { delivered: false, error: 'DM disabled by dashboard setting' }
+    : await notifyUser(interaction.user, {
+      title: '🎫 Your KiwiVerse ticket was created',
+      description: `Your **${categoryLabel}** ticket has been opened in **${interaction.guild.name}**.`,
+      color: 0x57f287,
+      fields: [{ name: 'Reason', value: reason }],
+    });
 
-  await interaction.reply({ content: `Ticket created: ${channel}${dm.delivered ? ' • DM sent.' : ' • I could not DM you because Discord blocked delivery.'}`, ephemeral: true });
+  const dmStatusText = ticketSettings.dmOnOpen === false ? '' : (dm.delivered ? ' • DM sent.' : ' • I could not DM you because Discord blocked delivery.');
+  await interaction.reply({ content: `Ticket created: ${channel}${dmStatusText}`, ephemeral: true });
 
   await logEvent(interaction.guild, database, 'ticketEvent', {
     action: 'opened',
@@ -229,15 +238,14 @@ async function fetchTranscript(channel) {
   return Buffer.from(lines.join('\n') || 'No messages were available for this ticket.', 'utf8');
 }
 
-async function sendTranscript(interaction, database, ticket) {
+async function sendTranscript(interaction, database, ticket, ticketSettings) {
   const transcript = await fetchTranscript(interaction.channel);
   const fileName = `ticket-${ticket.id}-${interaction.channel.id}.txt`;
   const attachment = new AttachmentBuilder(transcript, { name: fileName });
 
   // The dashboard-configured channel takes precedence; the env var remains
   // a fallback for deployments that haven't set it via the dashboard yet.
-  const archiveId = (await getSetting(database, interaction.guild.id, 'tickets.transcriptChannelId', null))
-    || process.env.TICKET_TRANSCRIPT_CHANNEL_ID;
+  const archiveId = ticketSettings.transcriptChannelId || process.env.TICKET_TRANSCRIPT_CHANNEL_ID;
   if (archiveId) {
     const archive = await interaction.guild.channels.fetch(archiveId).catch(() => null);
     if (archive?.isTextBased()) {
@@ -246,6 +254,10 @@ async function sendTranscript(interaction, database, ticket) {
         files: [attachment],
       }).catch((error) => console.error('[Tickets] Failed to post transcript to archive channel:', error));
     }
+  }
+
+  if (ticketSettings.dmOnClose === false) {
+    return { delivered: false, error: 'DM disabled by dashboard setting' };
   }
 
   const opener = await interaction.client.users.fetch(ticket.user_id).catch(() => null);
@@ -266,9 +278,10 @@ async function handleButton(interaction, database) {
   const ticket = await getTicket(database, interaction.channelId);
   if (!ticket) return interaction.reply({ content: 'This channel is not registered as a ticket.', ephemeral: true });
   const db = await database;
+  const ticketSettings = await getCachedSettingsByPrefix(database, interaction.guild.id, 'tickets');
 
   if (interaction.customId === 'ticket_claim' || interaction.customId === 'ticket_unclaim') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can claim tickets.', ephemeral: true });
+    if (!isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only staff can claim tickets.', ephemeral: true });
     const claiming = interaction.customId === 'ticket_claim';
     await db.run('UPDATE tickets SET claimed_by = ? WHERE channel_id = ?', claiming ? interaction.user.id : null, interaction.channelId);
     await interaction.update({ components: ticketControls(claiming, false) });
@@ -276,19 +289,22 @@ async function handleButton(interaction, database) {
   }
 
   if (interaction.customId === 'ticket_close') {
-    if (interaction.user.id !== ticket.user_id && !isStaff(interaction.member)) return interaction.reply({ content: 'Only the ticket owner or staff can close this ticket.', ephemeral: true });
+    if (interaction.user.id !== ticket.user_id && !isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only the ticket owner or staff can close this ticket.', ephemeral: true });
     await interaction.deferUpdate();
-    const dm = await sendTranscript(interaction, database, ticket);
+    const dm = await sendTranscript(interaction, database, ticket, ticketSettings);
     await db.run("UPDATE tickets SET status = 'closed', closed_by = ?, closed_at = CURRENT_TIMESTAMP WHERE channel_id = ?", interaction.user.id, interaction.channelId);
     await interaction.channel.permissionOverwrites.edit(ticket.user_id, { SendMessages: false }).catch(() => null);
     const controlMessage = interaction.message;
     await controlMessage.edit({ components: ticketControls(false, true) }).catch(() => null);
     await logEvent(interaction.guild, database, 'ticketEvent', { action: 'closed', ticketId: ticket.id, moderator: interaction.user });
-    return interaction.followUp(`🔒 Ticket closed by <@${interaction.user.id}>. ${dm.delivered ? 'The member was DM’d a transcript.' : 'Discord would not deliver the member DM; the transcript remains available to staff.'}`);
+    const closeDmText = ticketSettings.dmOnClose === false
+      ? 'DM notifications are disabled for this server (dashboard setting).'
+      : (dm.delivered ? 'The member was DM’d a transcript.' : 'Discord would not deliver the member DM; the transcript remains available to staff.');
+    return interaction.followUp(`🔒 Ticket closed by <@${interaction.user.id}>. ${closeDmText}`);
   }
 
   if (interaction.customId === 'ticket_reopen') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can reopen tickets.', ephemeral: true });
+    if (!isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only staff can reopen tickets.', ephemeral: true });
     await db.run("UPDATE tickets SET status = 'open', closed_by = NULL, closed_at = NULL WHERE channel_id = ?", interaction.channelId);
     await interaction.channel.permissionOverwrites.edit(ticket.user_id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => null);
     await interaction.update({ components: ticketControls(Boolean(ticket.claimed_by), false) });
@@ -299,7 +315,7 @@ async function handleButton(interaction, database) {
   }
 
   if (interaction.customId === 'ticket_delete') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can delete ticket channels.', ephemeral: true });
+    if (!isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only staff can delete ticket channels.', ephemeral: true });
     await interaction.reply({ content: '🗑️ Deleting this ticket channel in 3 seconds…' });
     await logEvent(interaction.guild, database, 'ticketEvent', { action: 'deleted', ticketId: ticket.id, moderator: interaction.user });
     setTimeout(() => interaction.channel.delete(`Ticket #${ticket.id} deleted by ${interaction.user.tag}`).catch((error) => console.error('[Tickets] Failed to delete ticket channel:', error)), 3000);
@@ -309,7 +325,8 @@ async function handleButton(interaction, database) {
 async function addUser(interaction, database, user) {
   const ticket = await getTicket(database, interaction.channelId);
   if (!ticket) return interaction.reply({ content: 'Use this command inside a ticket channel.', ephemeral: true });
-  if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can add users to tickets.', ephemeral: true });
+  const ticketSettings = await getCachedSettingsByPrefix(database, interaction.guild.id, 'tickets');
+  if (!isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only staff can add users to tickets.', ephemeral: true });
   await interaction.channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true });
   return interaction.reply({ content: `➕ ${user} was added to this ticket.` });
 }
@@ -317,7 +334,8 @@ async function addUser(interaction, database, user) {
 async function removeUser(interaction, database, user) {
   const ticket = await getTicket(database, interaction.channelId);
   if (!ticket) return interaction.reply({ content: 'Use this command inside a ticket channel.', ephemeral: true });
-  if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can remove users from tickets.', ephemeral: true });
+  const ticketSettings = await getCachedSettingsByPrefix(database, interaction.guild.id, 'tickets');
+  if (!isStaff(interaction.member, ticketSettings.staffRoleId)) return interaction.reply({ content: 'Only staff can remove users from tickets.', ephemeral: true });
   if (user.id === ticket.user_id) return interaction.reply({ content: 'The ticket owner cannot be removed. Close the ticket instead.', ephemeral: true });
   await interaction.channel.permissionOverwrites.delete(user.id).catch(() => null);
   return interaction.reply({ content: `➖ ${user} was removed from this ticket.` });

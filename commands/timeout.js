@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
 const { logEvent } = require('../services/loggingService');
+const { getSettingsByPrefix } = require('../services/settingsService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -60,6 +61,11 @@ module.exports = {
       return interaction.reply({ content: '⛔ You need Trial Mod or higher to use this command.', flags: MessageFlags.Ephemeral });
     }
 
+    const modSettings = await getSettingsByPrefix(database, interaction.guild.id, 'moderation');
+    if (modSettings.enabled === false) {
+      return interaction.reply({ content: '⛔ Moderation commands are currently disabled for this server (dashboard setting).', flags: MessageFlags.Ephemeral });
+    }
+
     const target = interaction.options.getUser('user');
     const durationMs = Number.parseInt(interaction.options.getString('duration'), 10);
     const reason = interaction.options.getString('reason') || 'No reason provided';
@@ -70,22 +76,27 @@ module.exports = {
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
       if (!member) return interaction.editReply({ content: '❌ Could not find that member in the server.' });
 
-      const dm = await notifyUser(target, {
-        title: '⏳ You have been timed out',
-        description: `You were timed out in **${interaction.guild.name}**.`,
-        color: 0xfee75c,
-        fields: [
-          { name: 'Duration', value: durationStr, inline: true },
-          { name: 'Reason', value: reason },
-        ],
-        footer: 'Your ability to interact will return automatically when the timeout expires.',
-      });
+      const dm = modSettings.dmAffectedUsers === false
+        ? { delivered: false, error: 'DM disabled by dashboard setting' }
+        : await notifyUser(target, {
+          title: '⏳ You have been timed out',
+          description: `You were timed out in **${interaction.guild.name}**.`,
+          color: 0xfee75c,
+          fields: [
+            { name: 'Duration', value: durationStr, inline: true },
+            { name: 'Reason', value: reason },
+          ],
+          footer: 'Your ability to interact will return automatically when the timeout expires.',
+        });
 
       await member.timeout(durationMs, `${interaction.user.tag} | ${reason}`);
       await logEvent(interaction.guild, database, 'memberTimeout', { target, moderator: interaction.user, reason, duration: durationStr, dmDelivered: dm.delivered });
 
+      const dmStatus = modSettings.dmAffectedUsers === false
+        ? 'DM notifications are disabled for this server (dashboard setting).'
+        : (dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.');
       return interaction.editReply({
-        content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,
+        content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n${dmStatus}`,
       });
     } catch (error) {
       console.error('Timeout error:', error);

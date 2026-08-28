@@ -1,6 +1,14 @@
 const { Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const inviteTracker = require('../services/inviteTrackerService');
 const { logEvent } = require('../services/loggingService');
+const { getCachedSettingsByPrefix } = require('../services/settingsService');
+const { notifyUser } = require('../services/notificationService');
+
+function applyTemplate(template, member) {
+  return template
+    .replaceAll('{user}', member.user.toString())
+    .replaceAll('{server}', member.guild.name);
+}
 
 // guildId -> Timeout that will lift a raid lockdown. Tracked (instead of a
 // fire-and-forget setTimeout) so a second raid burst re-arms the timer
@@ -17,35 +25,51 @@ module.exports = {
 
       await logEvent(member.guild, database, 'memberJoin', { member });
 
-      // Deliver welcome message
-      const welcomeChannel = member.guild.channels.cache.find(
-        (ch) => ch.name === process.env.WELCOME_CHANNEL_NAME && ch.isTextBased(),
-      );
+      const welcomeSettings = await getCachedSettingsByPrefix(database, member.guild.id, 'welcome');
 
-      if (welcomeChannel) {
-        const embed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle('🎉 Welcome to the KiwiVerse Studio')
-          .setDescription(
-            `Hey ${member.user}, glad you made it in!\n\nRead through the studio rules below, then press **Accept Studio Rules** to unlock the rest of the server.`,
-          )
-          .addFields(
-            { name: 'Rule 01 - Respect', value: 'Keep it civil. Zero tolerance for hate speech or harassment.' },
-            { name: 'Rule 02 - No Spam', value: 'No spamming, raiding, or unsolicited advertising.' },
-            { name: 'Rule 03 - Staff Calls', value: 'Follow direction from the KiwiVerse staff team at all times.' },
-          )
-          .setFooter({ text: 'KiwiVerse Moderation' })
-          .setTimestamp();
+      if (welcomeSettings.enabled !== false) {
+        const welcomeChannel = (welcomeSettings.channelId && member.guild.channels.cache.get(welcomeSettings.channelId))
+          || member.guild.channels.cache.find((ch) => ch.name === process.env.WELCOME_CHANNEL_NAME && ch.isTextBased());
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('accept_studio_rules')
-            .setLabel('Accept Studio Rules')
-            .setEmoji('✅')
-            .setStyle(ButtonStyle.Success),
-        );
+        const greeting = applyTemplate(welcomeSettings.message || 'Welcome {user} to {server}!', member);
 
-        await welcomeChannel.send({ content: `${member.user}`, embeds: [embed], components: [row] }).catch((error) => console.error('[Welcome] Failed to send welcome message:', error));
+        if (welcomeChannel?.isTextBased()) {
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle('🎉 Welcome to the KiwiVerse Studio')
+            .setDescription(
+              `${greeting}\n\nRead through the studio rules below, then press **Accept Studio Rules** to unlock the rest of the server.`,
+            )
+            .addFields(
+              { name: 'Rule 01 - Respect', value: 'Keep it civil. Zero tolerance for hate speech or harassment.' },
+              { name: 'Rule 02 - No Spam', value: 'No spamming, raiding, or unsolicited advertising.' },
+              { name: 'Rule 03 - Staff Calls', value: 'Follow direction from the KiwiVerse staff team at all times.' },
+            )
+            .setFooter({ text: 'KiwiVerse Moderation' })
+            .setTimestamp();
+
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('accept_studio_rules')
+              .setLabel('Accept Studio Rules')
+              .setEmoji('✅')
+              .setStyle(ButtonStyle.Success),
+          );
+
+          await welcomeChannel.send({ content: `${member.user}`, embeds: [embed], components: [row] }).catch((error) => console.error('[Welcome] Failed to send welcome message:', error));
+        }
+
+        if (welcomeSettings.dmWelcome) {
+          await notifyUser(member.user, {
+            title: `👋 Welcome to ${member.guild.name}`,
+            description: greeting,
+            color: 0x5865f2,
+          });
+        }
+
+        if (welcomeSettings.autoRoleId) {
+          await member.roles.add(welcomeSettings.autoRoleId, 'Welcome auto-role (dashboard setting)').catch((error) => console.error('[Welcome] Failed to add auto-role:', error));
+        }
       }
 
       // Track raid attempts

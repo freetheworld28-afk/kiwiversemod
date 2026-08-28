@@ -13,14 +13,22 @@ module.exports = {
     console.log(`✅ KiwiVerse Bot online as ${client.user.tag}`);
     client.user.setActivity('over the KiwiVerse', { type: ActivityType.Watching });
 
+    // Tracks whether each subsystem came up cleanly, for the startup health
+    // summary printed at the end - a non-critical failure here degrades
+    // that one line to ❌ without stopping the rest of startup.
+    const health = { database: false, storage: false, discord: true, dashboard: false, commands: false, configuration: false };
+
     // Database init is foundational - almost everything else depends on it,
     // so a failure here is fatal. Fail loudly and exit rather than limping
     // forward into a half-initialized state or crashing later via an
     // unhandled rejection with no context.
     try {
-      const { initDatabase } = require('../index.js');
+      const { initDatabase, persistentStorage } = require('../index.js');
       await initDatabase();
       await initDashboardSchema(database);
+      health.database = true;
+      health.storage = persistentStorage;
+      health.configuration = true;
     } catch (error) {
       console.error('❌ [Startup] Database initialization failed - the bot cannot safely continue:', error);
       process.exit(1);
@@ -28,6 +36,7 @@ module.exports = {
 
     try {
       startApiServer(client, database);
+      health.dashboard = true;
     } catch (error) {
       console.error('❌ [Dashboard] API server failed to start (bot continues without it):', error);
     }
@@ -77,8 +86,19 @@ module.exports = {
         await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
         console.log(`✅ [Commands] Registered ${commands.length} global slash commands`);
       }
+      health.commands = true;
     } catch (error) {
       console.error('❌ [Commands] Failed to register commands (bot continues running with previously-registered commands, if any):', error);
     }
+
+    const mark = (ok) => (ok ? '✅' : '❌');
+    console.log('—— KiwiVerse Startup Health ——');
+    console.log(`  Database:      ${mark(health.database)} ${health.database ? 'initialized' : 'FAILED'}`);
+    console.log(`  Storage:       ${mark(health.storage)} ${health.storage ? 'persistent /data storage' : 'ephemeral (not persistent across redeploys)'}`);
+    console.log(`  Discord:       ${mark(health.discord)} logged in as ${client.user.tag}`);
+    console.log(`  Dashboard:     ${mark(health.dashboard)} ${health.dashboard ? 'API listening' : 'FAILED TO START (degraded - bot still online)'}`);
+    console.log(`  Commands:      ${mark(health.commands)} ${health.commands ? 'registered' : 'FAILED TO REGISTER (degraded - previous registration, if any, still active)'}`);
+    console.log(`  Configuration: ${mark(health.configuration)} loaded`);
+    console.log('———————————————————————————————');
   },
 };
