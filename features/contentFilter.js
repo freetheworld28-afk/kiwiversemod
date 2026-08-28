@@ -1,5 +1,6 @@
-const { EmbedBuilder } = require('discord.js');
-const { getLogChannel } = require('../services/loggingService');
+'use strict';
+
+const { logEvent, markSuppressed } = require('../services/loggingService');
 
 const SLUR_FILTER = [
   'nigger',
@@ -38,30 +39,16 @@ function containsForbiddenContent(rawText) {
 
 module.exports = {
   name: 'contentFilter',
-  async onMessage(message, client, database, cache) {
+  async onMessage(message, client, database) {
     const violation = containsForbiddenContent(message.content || '');
     if (!violation) return;
 
+    // Mark this message ID before deleting it so the generic messageDelete
+    // log handler skips it - this richer, violation-specific embed is the
+    // log of record for filter-triggered deletions.
+    markSuppressed(`message-delete:${message.id}`);
     await message.delete().catch(() => null);
 
-    const logsChannel = await getLogChannel(message.guild, database, 'member');
-
-    if (logsChannel) {
-      const embed = new EmbedBuilder()
-        .setColor(0xed4245)
-        .setTitle('🛑 Content Filter Triggered')
-        .setDescription(`Intercepted and deleted a message from ${message.channel}.`)
-        .addFields(
-          { name: 'Member', value: `${message.author.tag} (${message.author.id})`, inline: true },
-          { name: 'Channel', value: `${message.channel}`, inline: true },
-          { name: 'Violation Type', value: violation === 'slur' ? 'Prohibited language' : 'Invite link', inline: true },
-          { name: 'Content', value: message.content.substring(0, 500) || '*empty*' },
-        )
-        .setFooter({ text: 'Deleted automatically' })
-        .setTimestamp();
-
-      await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post content-filter log:', error));
-    }
+    await logEvent(message.guild, database, 'automodAction', { message, violation });
   },
 };
-

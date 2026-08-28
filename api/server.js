@@ -5,6 +5,9 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const { PermissionFlagsBits } = require('discord.js');
 const levelingService = require('../services/levelingService');
+const { logEvent } = require('../services/loggingService');
+
+const MAX_CONFIG_VALUE_JSON_LENGTH = 20_000; // generous cap for a single settings value (arrays of IDs, etc.)
 
 let server = null;
 const startedAt = Date.now();
@@ -13,6 +16,11 @@ const sessions = new Map();
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+// /auth/discord is unauthenticated by necessity (it's the login entry
+// point), so nothing stops a burst of requests from growing oauthStates
+// faster than its TTL drains it. Cap it and evict the oldest entries rather
+// than let it grow unboundedly under such a burst.
+const MAX_OAUTH_STATES = 1000;
 
 function sendJson(res, status, payload, origin = '*') {
   res.writeHead(status, {
@@ -154,10 +162,29 @@ async function getConfig(db, guildId) {
 
 async function patchConfig(db, guildId, updates) {
   const entries = Object.entries(updates || {});
+  const applied = [];
+  const skipped = [];
+
   await db.exec('BEGIN');
   try {
     for (const [key, value] of entries) {
-      if (!/^[a-zA-Z0-9_.-]{1,80}$/.test(key)) continue;
+      if (!/^[a-zA-Z0-9_.-]{1,80}$/.test(key)) {
+        skipped.push({ key, reason: 'invalid_key' });
+        continue;
+      }
+
+      let serialized;
+      try {
+        serialized = JSON.stringify(value);
+      } catch {
+        skipped.push({ key, reason: 'not_serializable' });
+        continue;
+      }
+      if (serialized === undefined || serialized.length > MAX_CONFIG_VALUE_JSON_LENGTH) {
+        skipped.push({ key, reason: 'value_too_large' });
+        continue;
+      }
+
       await db.run(
         `INSERT INTO guild_settings (guild_id, key, value, updated_at)
          VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -165,8 +192,9 @@ async function patchConfig(db, guildId, updates) {
          DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
         guildId,
         key,
-        JSON.stringify(value),
+        serialized,
       );
+      applied.push(key);
     }
     await db.exec('COMMIT');
   } catch (error) {
@@ -179,7 +207,8 @@ async function patchConfig(db, guildId, updates) {
   // message picks up the new config instead of waiting out its TTL.
   levelingService.invalidateGuildSettings(guildId);
 
-  return getConfig(db, guildId);
+  const config = await getConfig(db, guildId);
+  return { config, applied, skipped };
 }
 
 async function isDashboardAdmin(guild, discordUser) {
@@ -204,6 +233,10 @@ async function handleDiscordLogin(req, res) {
   }
 
   cleanExpiredAuth();
+  if (oauthStates.size >= MAX_OAUTH_STATES) {
+    // Map preserves insertion order - the first key is the oldest entry.
+    oauthStates.delete(oauthStates.keys().next().value);
+  }
   const state = crypto.randomBytes(24).toString('hex');
   oauthStates.set(state, Date.now() + OAUTH_STATE_TTL_MS);
 
@@ -376,8 +409,16 @@ async function handleRequest(req, res, client, database) {
     if (req.method === 'PATCH' && url.pathname === '/api/config') {
       const body = await readJson(req);
       const updates = body.config && typeof body.config === 'object' ? body.config : body;
-      const config = await patchConfig(db, guild.id, updates);
-      return sendJson(res, 200, { ok: true, guildId: guild.id, config }, origin);
+      const { config, applied, skipped } = await patchConfig(db, guild.id, updates);
+
+      if (applied.length) {
+        await logEvent(guild, database, 'configChange', {
+          keys: applied,
+          source: auth.type === 'session' ? 'Dashboard' : 'API key',
+        });
+      }
+
+      return sendJson(res, 200, { ok: true, guildId: guild.id, config, applied, skipped }, origin);
     }
 
     if (req.method === 'GET' && url.pathname === '/api/tickets') {

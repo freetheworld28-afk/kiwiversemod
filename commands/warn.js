@@ -1,8 +1,8 @@
 'use strict';
 
-const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
-const { getLogChannel } = require('../services/loggingService');
+const { logEvent } = require('../services/loggingService');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -20,47 +20,58 @@ module.exports = {
     const reason = interaction.options.getString('reason');
     if (target.bot) return interaction.reply({ content: 'You cannot warn bots.', flags: MessageFlags.Ephemeral });
 
-    const db = await database;
-    await db.run(
-      `INSERT INTO users (discord_id, username, warnings) VALUES (?, ?, 1)
-       ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, warnings = COALESCE(users.warnings, 0) + 1`,
-      target.id,
-      target.username,
-    );
-    await db.run(
-      'INSERT INTO moderation_logs (discord_id, action, moderator_id, reason) VALUES (?, ?, ?, ?)',
-      target.id,
-      'warn',
-      interaction.user.id,
-      reason,
-    );
+    try {
+      const db = await database;
 
-    const row = await db.get('SELECT warnings FROM users WHERE discord_id = ?', target.id);
-    const dm = await notifyUser(target, {
-      title: `⚠️ Warning in ${interaction.guild.name}`,
-      description: 'A moderator issued you a warning.',
-      color: 0xfee75c,
-      fields: [
-        { name: 'Reason', value: reason },
-        { name: 'Total warnings', value: String(row?.warnings || 1), inline: true },
-      ],
-    });
+      // The warning count and its audit-log row must stay in sync - wrap
+      // both writes in a transaction so a mid-sequence crash can't leave
+      // one without the other.
+      await db.exec('BEGIN');
+      try {
+        await db.run(
+          `INSERT INTO users (discord_id, username, warnings) VALUES (?, ?, 1)
+           ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, warnings = COALESCE(users.warnings, 0) + 1`,
+          target.id,
+          target.username,
+        );
+        await db.run(
+          'INSERT INTO moderation_logs (discord_id, action, moderator_id, reason) VALUES (?, ?, ?, ?)',
+          target.id,
+          'warn',
+          interaction.user.id,
+          reason,
+        );
+        await db.exec('COMMIT');
+      } catch (error) {
+        await db.exec('ROLLBACK');
+        throw error;
+      }
 
-    const logs = await getLogChannel(interaction.guild, database, 'member');
-    if (logs) {
-      await logs.send({ embeds: [new EmbedBuilder()
-        .setColor(0xfee75c)
-        .setTitle('⚠️ Warning Issued')
-        .addFields(
-          { name: 'Member', value: `${target.tag} (${target.id})`, inline: true },
-          { name: 'Moderator', value: interaction.user.tag, inline: true },
-          { name: 'Total warnings', value: String(row?.warnings || 1), inline: true },
+      const row = await db.get('SELECT warnings FROM users WHERE discord_id = ?', target.id);
+      const totalWarnings = row?.warnings || 1;
+
+      const dm = await notifyUser(target, {
+        title: `⚠️ Warning in ${interaction.guild.name}`,
+        description: 'A moderator issued you a warning.',
+        color: 0xfee75c,
+        fields: [
           { name: 'Reason', value: reason },
-          { name: 'Member DM', value: dm.delivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
-        )
-        .setTimestamp()] }).catch((error) => console.error('Failed to post warn log:', error));
-    }
+          { name: 'Total warnings', value: String(totalWarnings), inline: true },
+        ],
+      });
 
-    return interaction.reply({ content: `⚠️ Warned **${target.tag}**. They now have **${row?.warnings || 1}** warning(s).`, flags: MessageFlags.Ephemeral });
+      await logEvent(interaction.guild, database, 'memberWarn', {
+        target,
+        moderator: interaction.user,
+        reason,
+        totalWarnings,
+        dmDelivered: dm.delivered,
+      });
+
+      return interaction.reply({ content: `⚠️ Warned **${target.tag}**. They now have **${totalWarnings}** warning(s).`, flags: MessageFlags.Ephemeral });
+    } catch (error) {
+      console.error('[Moderation] Warn command failed:', error);
+      return interaction.reply({ content: `❌ Failed to warn user: ${error.message}`, flags: MessageFlags.Ephemeral });
+    }
   },
 };

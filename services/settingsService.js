@@ -28,8 +28,11 @@ const DEFAULT_SETTINGS = {
   'logging.messageEdit': true,
   'logging.memberJoin': true,
   'logging.memberLeave': true,
+  'logging.memberUpdate': true,
   'logging.moderation': true,
   'logging.tickets': true,
+  'logging.giveaways': true,
+  'logging.configChanges': true,
   'logging.robloxVerification': true,
 
   'welcome.enabled': false,

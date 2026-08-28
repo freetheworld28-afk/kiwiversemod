@@ -1,6 +1,6 @@
-const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
-const { getLogChannel } = require('../services/loggingService');
+const { logEvent } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -28,24 +28,6 @@ function formatDuration(ms) {
   if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''}`;
   if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''}`;
   return `${seconds} second${seconds > 1 ? 's' : ''}`;
-}
-
-async function logModAction(interaction, database, target, reason, duration, dmDelivered) {
-  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
-  if (!logsChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setColor(0xfee75c)
-    .setTitle('📋 Timeout Issued')
-    .addFields(
-      { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
-      { name: 'Moderator', value: interaction.user.tag, inline: true },
-      { name: 'Duration', value: duration, inline: true },
-      { name: 'Reason', value: reason },
-      { name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
-    )
-    .setTimestamp();
-  await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post timeout log:', error));
 }
 
 module.exports = {
@@ -100,7 +82,7 @@ module.exports = {
       });
 
       await member.timeout(durationMs, `${interaction.user.tag} | ${reason}`);
-      await logModAction(interaction, database, target, reason, durationStr, dm.delivered);
+      await logEvent(interaction.guild, database, 'memberTimeout', { target, moderator: interaction.user, reason, duration: durationStr, dmDelivered: dm.delivered });
 
       return interaction.editReply({
         content: `⏳ **${target.tag}** has been timed out for ${durationStr}.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,

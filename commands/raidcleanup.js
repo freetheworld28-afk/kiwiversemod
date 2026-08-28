@@ -7,8 +7,15 @@ const {
   AuditLogEvent,
   MessageFlags,
 } = require('discord.js');
+const { logEvent } = require('../services/loggingService');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A mistaken wide time window/filter could otherwise match hundreds of
+// legitimate members and mass-kick them in one command. Above this count,
+// execute refuses and asks the operator to narrow the filters instead of
+// silently actioning everything that matched.
+const MAX_CANDIDATES_PER_RUN = 50;
 
 function parseTimestamp(value) {
   if (!value) return null;
@@ -295,6 +302,12 @@ module.exports = {
       return interaction.editReply({ content: '⛔ Cleanup cancelled. The confirmation value must be exactly `KICK`.' });
     }
 
+    if (result.candidates.length > MAX_CANDIDATES_PER_RUN) {
+      return interaction.editReply({
+        content: `⛔ Cleanup cancelled - ${result.candidates.length} candidates matched, above the safety cap of ${MAX_CANDIDATES_PER_RUN}. Narrow the time window or role filter and preview again before running execute on a batch this large.`,
+      });
+    }
+
     let kicked = 0;
     const failed = [];
     for (const candidate of result.candidates) {
@@ -311,6 +324,15 @@ module.exports = {
     }
 
     console.log(`[RaidCleanup] Complete. Removed ${kicked}/${result.candidates.length} accounts.`);
+
+    await logEvent(interaction.guild, database, 'raidCleanup', {
+      moderator: interaction.user,
+      mode: modeLabel,
+      kicked,
+      failed: failed.length,
+      matched: result.candidates.length,
+    });
+
     const embed = new EmbedBuilder()
       .setColor(failed.length ? 0xfee75c : 0x57f287)
       .setTitle('🧹 Raid Cleanup Complete')

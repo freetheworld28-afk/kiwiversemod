@@ -1,7 +1,7 @@
 'use strict';
 
-const { Events, EmbedBuilder } = require('discord.js');
-const { getLogChannel, isEventLoggingEnabled, truncate } = require('../services/loggingService');
+const { Events } = require('discord.js');
+const { logEvent } = require('../services/loggingService');
 
 module.exports = {
   name: Events.MessageUpdate,
@@ -19,38 +19,9 @@ module.exports = {
       // no actual content change - ignore those.
       if (!oldMessage.partial && !newMessage.partial && oldMessage.content === newMessage.content) return;
 
-      if (!(await isEventLoggingEnabled(database, guild.id, 'logging.messageEdit'))) return;
-
-      const logsChannel = await getLogChannel(guild, database, 'message');
-      if (!logsChannel) return;
-
-      const embed = new EmbedBuilder()
-        .setColor(0xfee75c)
-        .setTitle('📝 Message Edited')
-        .addFields(
-          { name: 'Channel', value: `${newMessage.channel}`, inline: true },
-          { name: 'Jump to Message', value: `[Click here](${newMessage.url})`, inline: true },
-          {
-            name: 'Before',
-            value: oldMessage.partial
-              ? '*Message was not cached, original content unavailable.*'
-              : (truncate(oldMessage.content) || '*empty*'),
-          },
-          { name: 'After', value: truncate(newMessage.content) || '*empty*' },
-        )
-        .setFooter({ text: `Message ID: ${newMessage.id}` })
-        .setTimestamp();
-
-      if (newMessage.author) {
-        embed.setAuthor({
-          name: `${newMessage.author.tag} (${newMessage.author.id})`,
-          iconURL: newMessage.author.displayAvatarURL(),
-        });
-      }
-
-      await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post message-edit log:', error));
+      await logEvent(guild, database, 'messageEdit', { oldMessage, newMessage });
     } catch (error) {
-      console.error('Error in messageUpdate:', error);
+      console.error('[Logging] Error in messageUpdate handler:', error);
     }
   },
 };
