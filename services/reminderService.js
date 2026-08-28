@@ -23,17 +23,27 @@ function scheduleOne(client, database, reminder) {
   const delay = Math.max(0, due - Date.now());
   const timeout = setTimeout(async () => {
     if (delay > MAX_TIMEOUT) {
+      // Long-delay reminders are chained in MAX_TIMEOUT-sized hops -
+      // scheduleOne() below sets its own fresh timer entry for reminder.id,
+      // so don't fall through to the delete below, which would remove that
+      // entry instead of this expired one.
       scheduleOne(client, database, reminder);
       return;
     }
-    const db = await database;
-    const fresh = await db.get('SELECT * FROM reminders WHERE id = ? AND delivered_at IS NULL', reminder.id);
-    if (!fresh) return;
-    const user = await client.users.fetch(fresh.user_id).catch(() => null);
-    if (user) await user.send(`⏰ **KiwiVerse Reminder #${fresh.id}**\n${fresh.message}`).catch(() => null);
-    await db.run('UPDATE reminders SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?', fresh.id);
-    timers.delete(fresh.id);
+    try {
+      const db = await database;
+      const fresh = await db.get('SELECT * FROM reminders WHERE id = ? AND delivered_at IS NULL', reminder.id);
+      if (!fresh) return;
+      const user = await client.users.fetch(fresh.user_id).catch(() => null);
+      if (user) await user.send(`⏰ **KiwiVerse Reminder #${fresh.id}**\n${fresh.message}`).catch(() => null);
+      await db.run('UPDATE reminders SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?', fresh.id);
+    } catch (error) {
+      console.error(`[Reminders] Failed to deliver reminder #${reminder.id}:`, error);
+    } finally {
+      timers.delete(reminder.id);
+    }
   }, Math.min(delay, MAX_TIMEOUT));
+  timeout.unref?.();
   timers.set(reminder.id, timeout);
 }
 

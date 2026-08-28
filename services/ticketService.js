@@ -14,6 +14,8 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { notifyUser } = require('./notificationService');
+const { getSetting } = require('./settingsService');
+const { logEvent } = require('./loggingService');
 
 const CATEGORY_OPTIONS = [
   ['player-support', 'Player Support', 'General help with the game or community', '🎮'],
@@ -70,6 +72,18 @@ async function ensureSchema(database) {
 
   for (const [name, type] of additions) {
     if (!names.has(name)) await db.exec(`ALTER TABLE tickets ADD COLUMN ${name} ${type}`);
+  }
+
+  // Prevents two rapid category selections from the same user creating two
+  // simultaneously-open tickets in the same category (closes a
+  // check-then-insert race in createTicket below). Wrapped in a try/catch:
+  // if any pre-existing duplicate-open rows already exist in production
+  // data, SQLite refuses to create the index - log it rather than crash.
+  try {
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_open_unique
+      ON tickets(guild_id, user_id, category) WHERE status = 'open'`);
+  } catch (error) {
+    console.error('[Tickets] Could not create open-ticket uniqueness index (likely pre-existing duplicate open tickets) - the check-then-insert guard in createTicket still applies, just without a DB-level backstop:', error.message);
   }
 }
 
@@ -186,6 +200,13 @@ async function createTicket(interaction, database, category, reason) {
   });
 
   await interaction.reply({ content: `Ticket created: ${channel}${dm.delivered ? ' • DM sent.' : ' • I could not DM you because Discord blocked delivery.'}`, ephemeral: true });
+
+  await logEvent(interaction.guild, database, 'ticketEvent', {
+    action: 'opened',
+    ticketId: result.lastID,
+    user: interaction.user,
+    extra: `${categoryLabel} • ${channel}`,
+  });
 }
 
 async function fetchTranscript(channel) {
@@ -213,14 +234,17 @@ async function sendTranscript(interaction, database, ticket) {
   const fileName = `ticket-${ticket.id}-${interaction.channel.id}.txt`;
   const attachment = new AttachmentBuilder(transcript, { name: fileName });
 
-  const archiveId = process.env.TICKET_TRANSCRIPT_CHANNEL_ID;
+  // The dashboard-configured channel takes precedence; the env var remains
+  // a fallback for deployments that haven't set it via the dashboard yet.
+  const archiveId = (await getSetting(database, interaction.guild.id, 'tickets.transcriptChannelId', null))
+    || process.env.TICKET_TRANSCRIPT_CHANNEL_ID;
   if (archiveId) {
     const archive = await interaction.guild.channels.fetch(archiveId).catch(() => null);
     if (archive?.isTextBased()) {
       await archive.send({
         content: `Transcript for ticket #${ticket.id} • <@${ticket.user_id}> • closed by <@${interaction.user.id}>`,
         files: [attachment],
-      }).catch(() => null);
+      }).catch((error) => console.error('[Tickets] Failed to post transcript to archive channel:', error));
     }
   }
 
@@ -259,6 +283,7 @@ async function handleButton(interaction, database) {
     await interaction.channel.permissionOverwrites.edit(ticket.user_id, { SendMessages: false }).catch(() => null);
     const controlMessage = interaction.message;
     await controlMessage.edit({ components: ticketControls(false, true) }).catch(() => null);
+    await logEvent(interaction.guild, database, 'ticketEvent', { action: 'closed', ticketId: ticket.id, moderator: interaction.user });
     return interaction.followUp(`🔒 Ticket closed by <@${interaction.user.id}>. ${dm.delivered ? 'The member was DM’d a transcript.' : 'Discord would not deliver the member DM; the transcript remains available to staff.'}`);
   }
 
@@ -267,6 +292,7 @@ async function handleButton(interaction, database) {
     await db.run("UPDATE tickets SET status = 'open', closed_by = NULL, closed_at = NULL WHERE channel_id = ?", interaction.channelId);
     await interaction.channel.permissionOverwrites.edit(ticket.user_id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => null);
     await interaction.update({ components: ticketControls(Boolean(ticket.claimed_by), false) });
+    await logEvent(interaction.guild, database, 'ticketEvent', { action: 'reopened', ticketId: ticket.id, moderator: interaction.user });
     const opener = await interaction.client.users.fetch(ticket.user_id).catch(() => null);
     if (opener) await notifyUser(opener, { title: `🔓 KiwiVerse ticket #${ticket.id} reopened`, description: `Your ticket in **${interaction.guild.name}** has been reopened by staff.`, color: 0x57f287 });
     return interaction.followUp(`🔓 Ticket reopened by <@${interaction.user.id}>.`);
@@ -275,7 +301,8 @@ async function handleButton(interaction, database) {
   if (interaction.customId === 'ticket_delete') {
     if (!isStaff(interaction.member)) return interaction.reply({ content: 'Only staff can delete ticket channels.', ephemeral: true });
     await interaction.reply({ content: '🗑️ Deleting this ticket channel in 3 seconds…' });
-    setTimeout(() => interaction.channel.delete(`Ticket #${ticket.id} deleted by ${interaction.user.tag}`).catch(() => null), 3000);
+    await logEvent(interaction.guild, database, 'ticketEvent', { action: 'deleted', ticketId: ticket.id, moderator: interaction.user });
+    setTimeout(() => interaction.channel.delete(`Ticket #${ticket.id} deleted by ${interaction.user.tag}`).catch((error) => console.error('[Tickets] Failed to delete ticket channel:', error)), 3000);
   }
 }
 

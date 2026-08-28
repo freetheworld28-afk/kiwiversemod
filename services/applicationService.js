@@ -12,6 +12,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { notifyUser } = require('./notificationService');
+const { logEvent } = require('./loggingService');
 
 const DEFAULT_FORMS = [
   {
@@ -83,6 +84,16 @@ async function ensureSchema(database, guildId = null) {
 
     CREATE INDEX IF NOT EXISTS idx_applications_guild_status ON applications(guild_id, status);
   `);
+
+  // Prevents two rapid submissions from the same user creating two
+  // simultaneously-active applications of the same type (closes a
+  // check-then-insert race in submitApplication below).
+  try {
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_active_unique
+      ON applications(guild_id, user_id, application_type) WHERE status IN ('pending', 'interview')`);
+  } catch (error) {
+    console.error('[Applications] Could not create active-application uniqueness index (likely pre-existing duplicates) - the check-then-insert guard in submitApplication still applies, just without a DB-level backstop:', error.message);
+  }
 
   if (guildId) {
     for (const form of DEFAULT_FORMS) {
@@ -390,6 +401,15 @@ async function handleDecision(interaction, database) {
   else embed.addFields({ name: 'Status', value: `${newStatus[0].toUpperCase()}${newStatus.slice(1)} by <@${interaction.user.id}>` });
 
   await interaction.update({ embeds: [embed], components: decisionButtons(id, newStatus !== 'interview') });
+
+  await logEvent(interaction.guild, database, 'applicationDecision', {
+    applicationId: id,
+    applicationType: app.application_type,
+    applicant: applicant || { tag: app.username || app.user_id, id: app.user_id },
+    moderator: interaction.user,
+    status: newStatus,
+  });
+
   if (newStatus === 'interview') return interaction.followUp({ content: `💬 Application #${id} moved to interview.`, ephemeral: true });
 }
 

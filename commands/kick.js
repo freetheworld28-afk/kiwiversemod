@@ -1,6 +1,6 @@
-const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
-const { getLogChannel } = require('../services/loggingService');
+const { logEvent, markSuppressed } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -17,23 +17,6 @@ function getStaffTier(member) {
     if (tier.id && member.roles.cache.has(tier.id)) highestTier = index;
   });
   return highestTier;
-}
-
-async function logModAction(interaction, database, target, reason, dmDelivered) {
-  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
-  if (!logsChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setColor(0xe67e22)
-    .setTitle('📋 Kick Issued')
-    .addFields(
-      { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
-      { name: 'Moderator', value: interaction.user.tag, inline: true },
-      { name: 'Reason', value: reason },
-      { name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true },
-    )
-    .setTimestamp();
-  await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post kick log:', error));
 }
 
 module.exports = {
@@ -65,8 +48,13 @@ module.exports = {
         footer: 'You may rejoin unless server staff have restricted access.',
       });
 
+      // Kicking fires GuildMemberRemove - suppress the generic "member left"
+      // log for this departure so this richer kick-specific entry is the
+      // only one posted.
+      markSuppressed(`member-remove:${interaction.guild.id}:${target.id}`);
+
       await member.kick(`${interaction.user.tag} | ${reason}`);
-      await logModAction(interaction, database, target, reason, dm.delivered);
+      await logEvent(interaction.guild, database, 'memberKick', { target, moderator: interaction.user, reason, dmDelivered: dm.delivered });
 
       return interaction.editReply({
         content: `👢 **${target.tag}** has been kicked.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,

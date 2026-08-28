@@ -1,6 +1,7 @@
 'use strict';
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
+const { logEvent } = require('./loggingService');
 
 const timers = new Map();
 const MAX_TIMEOUT = 2_000_000_000;
@@ -101,6 +102,16 @@ async function endGiveaway(client, database, giveawayId, { reroll = false } = {}
     if (user) await user.send(`🎉 You won **${giveaway.prize}** in a ${channel ? channel.toString() : 'server'} giveaway!`).catch(() => null);
   }
 
+  const guild = client.guilds.cache.get(giveaway.guild_id);
+  if (guild) {
+    await logEvent(guild, database, 'giveawayEvent', {
+      action: reroll ? 'rerolled' : 'ended',
+      giveawayId,
+      prize: giveaway.prize,
+      winners,
+    });
+  }
+
   return { ...giveaway, ended_at: new Date().toISOString(), winner_ids: JSON.stringify(winners) };
 }
 
@@ -159,6 +170,14 @@ async function start(interaction, database, { prize, durationMs, winnersCount, c
   await db.run('UPDATE giveaways SET message_id = ? WHERE id = ?', posted.id, giveaway.id);
   giveaway.message_id = posted.id;
   scheduleEnd(interaction.client, database, giveaway);
+
+  await logEvent(interaction.guild, database, 'giveawayEvent', {
+    action: 'started',
+    giveawayId: giveaway.id,
+    prize: giveaway.prize,
+    host: interaction.user,
+  });
+
   return giveaway;
 }
 

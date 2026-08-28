@@ -2,6 +2,49 @@
 
 require('dotenv').config();
 
+// Crash defense-in-depth: a rejection that nobody awaits/catches (a
+// fire-and-forget Discord API call, a stray timer callback) would otherwise
+// take the whole bot down on modern Node. Log it and keep running - one
+// broken feature should never take the rest of the bot offline.
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled promise rejection (bot is continuing to run):', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[Process] Uncaught exception (bot is continuing to run):', error);
+});
+
+// Fail fast and clearly if required configuration is missing, instead of
+// limping into a broken state (client.login() throwing a cryptic error,
+// command registration failing silently, etc). Never logs secret values,
+// only which variable names are missing/unset.
+function validateEnvironment() {
+  const missing = [];
+  const warnings = [];
+
+  if (!process.env.DISCORD_TOKEN) missing.push('DISCORD_TOKEN');
+  if (!process.env.CLIENT_ID) missing.push('CLIENT_ID');
+
+  if (!process.env.GUILD_ID) {
+    warnings.push('GUILD_ID is not set - slash commands will register globally (can take up to an hour to propagate) and the Dashboard API cannot resolve a guild, so it will not function.');
+  }
+  if (!process.env.DASHBOARD_API_KEY && !process.env.DISCORD_CLIENT_SECRET) {
+    warnings.push('Neither DASHBOARD_API_KEY nor DISCORD_CLIENT_SECRET (for Discord OAuth login) is set - the Dashboard API will have no way to authenticate any request.');
+  }
+  if (!process.env.DASHBOARD_ORIGIN) {
+    warnings.push('DASHBOARD_ORIGIN is not set - the Dashboard API currently allows cross-origin requests from any site for authenticated routes. Set DASHBOARD_ORIGIN to your dashboard\'s URL to lock this down.');
+  }
+
+  if (missing.length) {
+    console.error(`❌ [Config] Missing required environment variable(s): ${missing.join(', ')}`);
+    console.error('❌ [Config] KiwiVerse cannot start without these. Set them and restart.');
+    process.exit(1);
+  }
+
+  for (const warning of warnings) console.warn(`⚠️ [Config] ${warning}`);
+}
+
+validateEnvironment();
+
 const fs = require('fs');
 const path = require('path');
 const {
@@ -68,6 +111,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildModeration,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildVoiceStates,
@@ -246,6 +290,16 @@ async function initDatabase() {
       value TEXT,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Indexes for the hottest/most frequent queries. All additive (IF NOT
+    -- EXISTS), safe to run on every startup against existing data.
+    CREATE INDEX IF NOT EXISTS idx_users_xp ON users(xp DESC);
+    CREATE INDEX IF NOT EXISTS idx_users_balance ON users(balance DESC);
+    -- Read on every non-bot message (features/autoResponses.js) - the
+    -- single hottest unindexed query in the codebase before this.
+    CREATE INDEX IF NOT EXISTS idx_autoresponses_guild ON autoresponses(guild_id);
+    CREATE INDEX IF NOT EXISTS idx_moderation_logs_discord ON moderation_logs(discord_id);
+    CREATE INDEX IF NOT EXISTS idx_tickets_guild_status ON tickets(guild_id, status);
   `);
 
   const installIdRow = await db.get("SELECT value FROM bot_metadata WHERE key = 'install_id'");

@@ -1,6 +1,6 @@
-const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { notifyUser } = require('../services/notificationService');
-const { getLogChannel } = require('../services/loggingService');
+const { logEvent, markSuppressed } = require('../services/loggingService');
 
 const STAFF_TIERS = [
   { label: 'Trial Mod', id: process.env.TRIAL_MOD_ROLE_ID },
@@ -18,27 +18,6 @@ function getStaffTier(member) {
     if (tier.id && member.roles.cache.has(tier.id)) highestTier = index;
   });
   return highestTier;
-}
-
-async function logModAction(interaction, database, action, target, reason, extraFields = [], dmDelivered = null) {
-  const logsChannel = await getLogChannel(interaction.guild, database, 'member');
-
-  if (logsChannel) {
-    const embed = new EmbedBuilder()
-      .setColor(action === 'Ban' ? 0xed4245 : action === 'Kick' ? 0xe67e22 : 0xfee75c)
-      .setTitle(`📋 ${action} Issued`)
-      .addFields(
-        { name: 'Target', value: `${target.tag} (${target.id})`, inline: true },
-        { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-        ...extraFields,
-        { name: 'Reason', value: reason || 'No reason provided.' },
-        ...(dmDelivered === null ? [] : [{ name: 'Member DM', value: dmDelivered ? '✅ Delivered' : '⚠️ Not delivered', inline: true }]),
-      )
-      .setFooter({ text: `Actioned by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    await logsChannel.send({ embeds: [embed] }).catch((error) => console.error('Failed to post ban log:', error));
-  }
 }
 
 module.exports = {
@@ -75,14 +54,25 @@ module.exports = {
         footer: 'If you believe this was a mistake, use the server appeal process if available.',
       });
 
+      // A ban fires both GuildBanAdd and (if the target was still a member)
+      // GuildMemberRemove - suppress both so the dedicated ban-log handler
+      // (with full command context: reason, purge days, DM status) is the
+      // single log entry, not a duplicate.
+      markSuppressed(`ban:${interaction.guild.id}:${target.id}`);
+      markSuppressed(`member-remove:${interaction.guild.id}:${target.id}`);
+
       await interaction.guild.members.ban(target.id, {
         deleteMessageSeconds: purgeDays * 86400,
         reason: `${interaction.user.tag} | ${reason}`,
       });
 
-      await logModAction(interaction, database, 'Ban', target, reason, [
-        { name: 'Message Purge', value: `${purgeDays} day(s)`, inline: true },
-      ], dm.delivered);
+      await logEvent(interaction.guild, database, 'memberBan', {
+        user: target,
+        moderator: interaction.user,
+        reason,
+        native: false,
+        extraFields: [{ name: 'Message Purge', value: `${purgeDays} day(s)`, inline: true }],
+      });
 
       return interaction.editReply({
         content: `🔨 **${target.tag}** has been banned.\n${dm.delivered ? '📨 Member DM delivered.' : '⚠️ Discord would not deliver the member DM; this was logged for staff.'}`,

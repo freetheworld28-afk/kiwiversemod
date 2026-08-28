@@ -1,12 +1,21 @@
 const { Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const inviteTracker = require('../services/inviteTrackerService');
-const { getLogChannel } = require('../services/loggingService');
+const { logEvent } = require('../services/loggingService');
+
+// guildId -> Timeout that will lift a raid lockdown. Tracked (instead of a
+// fire-and-forget setTimeout) so a second raid burst re-arms the timer
+// instead of the original one silently lifting the newer lockdown early,
+// and so the callback can be null-checked/caught instead of risking an
+// unhandled promise rejection 5 minutes after the raid.
+const raidLockdownTimers = new Map();
 
 module.exports = {
   name: Events.GuildMemberAdd,
   async execute(member, client, database, cache) {
     try {
       await inviteTracker.handleMemberAdd(member, database);
+
+      await logEvent(member.guild, database, 'memberJoin', { member });
 
       // Deliver welcome message
       const welcomeChannel = member.guild.channels.cache.find(
@@ -36,15 +45,16 @@ module.exports = {
             .setStyle(ButtonStyle.Success),
         );
 
-        await welcomeChannel.send({ content: `${member.user}`, embeds: [embed], components: [row] });
+        await welcomeChannel.send({ content: `${member.user}`, embeds: [embed], components: [row] }).catch((error) => console.error('[Welcome] Failed to send welcome message:', error));
       }
 
       // Track raid attempts
       const now = Date.now();
-      const raidLog = cache.get(`raid_log_${member.guild.id}`) || [];
+      const guildId = member.guild.id;
+      const raidLog = cache.get(`raid_log_${guildId}`) || [];
       const recentJoins = raidLog.filter((timestamp) => now - timestamp <= 5000);
       recentJoins.push(now);
-      cache.set(`raid_log_${member.guild.id}`, recentJoins);
+      cache.set(`raid_log_${guildId}`, recentJoins);
 
       if (recentJoins.length >= 10) {
         const generalChannel = member.guild.channels.cache.find(
@@ -53,22 +63,34 @@ module.exports = {
         if (generalChannel) {
           await generalChannel.permissionOverwrites.edit(member.guild.roles.everyone, {
             SendMessages: false,
+          }).catch((error) => console.error('[Anti-Raid] Failed to lock channel:', error));
+
+          await logEvent(member.guild, database, 'antiRaid', {
+            joinCount: recentJoins.length,
+            lockedChannel: generalChannel,
           });
 
-          const logsChannel = await getLogChannel(member.guild, database, 'member');
-          if (logsChannel) {
-            const raidEmbed = new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle('🚨 Anti-Raid Lockdown Engaged')
-              .setDescription(`Detected **${recentJoins.length} joins** in a 5-second window.`)
-              .addFields({ name: 'Channel Locked', value: `${generalChannel}` })
-              .setTimestamp();
-            await logsChannel.send({ embeds: [raidEmbed] });
-          }
+          // Re-arm: cancel any prior lockdown timer for this guild so a
+          // second raid burst doesn't get its lockdown lifted early by the
+          // first burst's now-stale timer.
+          const existingTimer = raidLockdownTimers.get(guildId);
+          if (existingTimer) clearTimeout(existingTimer);
 
-          setTimeout(() => {
-            generalChannel.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: null });
+          const timer = setTimeout(async () => {
+            raidLockdownTimers.delete(guildId);
+            try {
+              // Re-fetch rather than trust the channel object captured 5
+              // minutes ago - it may have been deleted or renamed since.
+              const guild = client.guilds.cache.get(guildId);
+              const channel = guild?.channels.cache.get(generalChannel.id);
+              if (!channel) return;
+              await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null });
+            } catch (error) {
+              console.error('[Anti-Raid] Failed to lift lockdown:', error);
+            }
           }, 5 * 60 * 1000);
+          timer.unref?.();
+          raidLockdownTimers.set(guildId, timer);
         }
       }
     } catch (error) {
